@@ -354,8 +354,10 @@ export class MediaRepository {
       'ffprobe',
       [
         '-v',
-        'error',
-        ...(options ? ['-nofind_stream_info', '-fflags', '+noparse+nofillin'] : []),
+        options ? 'warning' : 'error',
+        ...(options
+          ? ['-fflags', '+noparse', '-analyzeduration', '1', '-probesize', '4194304', '-fpsprobesize', '0']
+          : []),
         '-select_streams',
         String(streamIndex),
         '-show_entries',
