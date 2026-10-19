@@ -5,7 +5,7 @@ import { Test } from '@nestjs/testing';
 import { Queue, Worker } from 'bullmq';
 import { Kysely, sql } from 'kysely';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { link, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
@@ -25,6 +25,7 @@ import { UploadTransferRepository } from 'src/repositories/upload-transfer.repos
 import 'src/schema/index.js';
 import { down, up } from 'src/schema/migrations-gallery/1798000000000-AddUploadTransfers.js';
 import { up as fenceStages } from 'src/schema/migrations-gallery/1798100000000-FenceOriginalStageGenerations.js';
+import { BaseService } from 'src/services/base.service.js';
 import { JobService } from 'src/services/job.service.js';
 import { OriginalStageService } from 'src/services/original-stage.service.js';
 import { StorageService } from 'src/services/storage.service.js';
@@ -33,6 +34,17 @@ import { getKyselyConfig } from 'src/utils/database.js';
 import { newConfigRepositoryMock } from 'test/repositories/config.repository.mock.js';
 import { newJobRepositoryMock } from 'test/repositories/job.repository.mock.js';
 import { newTestService } from 'test/utils.js';
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...actual, link: vi.fn(actual.link), rename: vi.fn(actual.rename) };
+});
+
+class OriginalReader extends BaseService {
+  read(key: string) {
+    return this.ensureLocalFile(key);
+  }
+}
 
 const enabled = process.env.IMMICH_TEST_DOCKER === 'true';
 
@@ -418,6 +430,114 @@ describe.skipIf(!enabled)('upload sessions with PostgreSQL and MinIO', () => {
     ).toHaveLength(1);
     await reader?.cleanup();
     get.mockRestore();
+  });
+
+  it('retains legacy local bytes through an atomic copy when hard links cross filesystems', async () => {
+    const assetId = randomUUID();
+    const key = `upload/${ownerId}/${assetId}.jpg`;
+    const localPath = join(directory, `${assetId}-multer.jpg`);
+    await writeFile(localPath, contents);
+    vi.mocked(link).mockRejectedValueOnce(Object.assign(new Error('Cross-device link'), { code: 'EXDEV' }));
+    const reads = vi.spyOn(backend, 'get');
+    try {
+      expect(await stages.adoptLegacy(assetId, key, contents.length, localPath)).toBe(true);
+      await rm(localPath);
+      const reader = await stages.acquire(key);
+      expect(reader).toBeDefined();
+      const bytes = await readFile(reader!.localPath);
+      expect(bytes.equals(contents)).toBe(true);
+      const files = await readdir(directory);
+      expect(files.filter((name) => name.startsWith(assetId))).toHaveLength(1);
+      expect(reads).not.toHaveBeenCalled();
+      await reader?.cleanup();
+    } finally {
+      reads.mockRestore();
+    }
+  });
+
+  it('commits a verified original when the optional stage cannot be published', async () => {
+    const session = await upload();
+    const row = await repo.get(session.id);
+    vi.mocked(rename).mockRejectedValueOnce(Object.assign(new Error('No space left'), { code: 'ENOSPC' }));
+    const reads = vi.spyOn(backend, 'get');
+    try {
+      const completed = await complete(session.id);
+      expect(completed.state).toBe('committed');
+      const stage = await db.selectFrom('gallery_original_stage').selectAll().executeTakeFirstOrThrow();
+      expect(stage.path).toBeNull();
+      expect(stage.retained).toBe(false);
+      const files = await readdir(directory);
+      expect(files.some((name) => name.startsWith(row!.assetId))).toBe(false);
+      expect(reads).toHaveBeenCalledTimes(1);
+    } finally {
+      reads.mockRestore();
+    }
+  });
+
+  it('uses normal scratch downloads when the configured stage budget cannot fit the original', async () => {
+    const env = config.getEnv();
+    config.getEnv.mockReturnValue({ ...env, transfer: { ...env.transfer, stageMaxBytes: 1 } });
+    const reads = vi.spyOn(backend, 'get');
+    try {
+      const session = await upload();
+      const completed = await complete(session.id);
+      expect(completed.state).toBe('committed');
+      const row = await repo.get(session.id);
+      const { sut: reader } = newTestService(OriginalReader, { originalStages: stages });
+      for (let index = 0; index < 2; index++) {
+        const local = await reader.read(row!.key);
+        const bytes = await readFile(local.localPath);
+        expect(bytes.equals(contents)).toBe(true);
+        await local.cleanup();
+        await expect(readFile(local.localPath)).rejects.toThrow();
+      }
+      expect(reads).toHaveBeenCalledTimes(3);
+      const stage = await db.selectFrom('gallery_original_stage').selectAll().executeTakeFirstOrThrow();
+      expect(stage.retained).toBe(false);
+    } finally {
+      reads.mockRestore();
+      config.getEnv.mockReturnValue(env);
+    }
+  });
+
+  it('refills a lost stage once for concurrent readers from separate service instances', async () => {
+    const session = await upload();
+    await complete(session.id);
+    const stage = await db.selectFrom('gallery_original_stage').selectAll().executeTakeFirstOrThrow();
+    await rm(stage.path!);
+    const reads = vi.spyOn(backend, 'get');
+    try {
+      const replacement = new OriginalStageService(repo, config);
+      const readers = await Promise.all([stages.acquire(stage.key), replacement.acquire(stage.key)]);
+      expect(readers.every((reader) => reader !== undefined)).toBe(true);
+      expect(readers[0]!.localPath).toBe(readers[1]!.localPath);
+      const bytes = await readFile(readers[0]!.localPath);
+      expect(bytes.equals(contents)).toBe(true);
+      expect(reads).toHaveBeenCalledTimes(1);
+      await Promise.all(readers.map((reader) => reader!.cleanup()));
+    } finally {
+      reads.mockRestore();
+    }
+  });
+
+  it('keeps an expired stage until its active reader releases the pin', async () => {
+    const session = await upload();
+    await complete(session.id);
+    const stage = await db.selectFrom('gallery_original_stage').selectAll().executeTakeFirstOrThrow();
+    const reader = await stages.acquire(stage.key);
+    expect(reader).toBeDefined();
+    await db
+      .updateTable('gallery_original_stage')
+      .set({ expiresAt: new Date(0) })
+      .where('assetId', '=', stage.assetId)
+      .execute();
+    await stages.reconcile();
+    const bytes = await readFile(reader!.localPath);
+    expect(bytes.equals(contents)).toBe(true);
+    expect(await stages.acquire(stage.key)).toBeUndefined();
+    await reader!.cleanup();
+    await stages.reconcile();
+    await expect(readFile(reader!.localPath)).rejects.toThrow();
   });
 
   it('records a real Redis deferred stalled failure even when BullMQ bypasses the application handler', async () => {

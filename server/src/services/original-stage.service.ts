@@ -1,7 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { sql } from 'kysely';
 import { createHash, randomUUID } from 'node:crypto';
-import { access, link, mkdir, open, readdir, rename, rm, stat } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { access, copyFile, link, mkdir, open, readdir, rename, rm, stat } from 'node:fs/promises';
 import { extname, join } from 'node:path';
 import { setTimeout } from 'node:timers/promises';
 import { StorageCore } from 'src/cores/storage.core.js';
@@ -142,22 +143,33 @@ export class OriginalStageService {
       }
       let stagePath: string | null = null;
       if (output && partial && published && token) {
-        await output.sync();
-        await output.close();
-        output = undefined;
-        await rename(partial, published);
-        const row = await this.transfers.db
-          .updateTable('gallery_original_stage')
-          .set({
-            path: published,
-            retained: true,
-            claimToken: null,
-            claimUntil: null,
-          })
-          .where('assetId', '=', assetId)
-          .where('claimToken', '=', token)
-          .returning('assetId')
-          .executeTakeFirst();
+        let staged = false;
+        try {
+          await output.sync();
+          await output.close();
+          output = undefined;
+          await rename(partial, published);
+          staged = true;
+        } catch {
+          await output?.close().catch(() => {});
+          output = undefined;
+          await rm(partial, { force: true });
+          await this.discard(assetId, { kind: 'generation', token });
+        }
+        const row = staged
+          ? await this.transfers.db
+              .updateTable('gallery_original_stage')
+              .set({
+                path: published,
+                retained: true,
+                claimToken: null,
+                claimUntil: null,
+              })
+              .where('assetId', '=', assetId)
+              .where('claimToken', '=', token)
+              .returning('assetId')
+              .executeTakeFirst()
+          : undefined;
         if (row) {
           stagePath = published;
         } else {
@@ -187,21 +199,40 @@ export class OriginalStageService {
       return false;
     }
     const path = join(this.directory, `${assetId}-${token}${extname(key)}`);
+    const partial = join(this.directory, `${assetId}-${token}.partial${extname(key)}`);
     try {
       await mkdir(this.directory, { recursive: true });
-      await link(localPath, path);
-      await this.transfers.db
+      try {
+        await link(localPath, path);
+      } catch (error) {
+        if (!(error instanceof Error) || !('code' in error) || error.code !== 'EXDEV') {
+          throw error;
+        }
+        await copyFile(localPath, partial, constants.COPYFILE_FICLONE);
+        const output = await open(partial, 'r');
+        try {
+          await output.sync();
+        } finally {
+          await output.close();
+        }
+        await rename(partial, path);
+      }
+      const row = await this.transfers.db
         .updateTable('gallery_original_stage')
         .set({ path, retained: true, claimToken: null, claimUntil: null })
         .where('assetId', '=', assetId)
         .where('claimToken', '=', token)
-        .execute();
+        .returning('assetId')
+        .executeTakeFirst();
+      if (!row) {
+        await rm(path, { force: true });
+        return false;
+      }
       return true;
     } catch {
+      await rm(partial, { force: true });
       await rm(path, { force: true });
-      if (token) {
-        await this.discard(assetId, { kind: 'generation', token });
-      }
+      await this.discard(assetId, { kind: 'generation', token });
       return false;
     }
   }
