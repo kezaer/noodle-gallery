@@ -10,14 +10,8 @@ name: Gallery Revert-to-Immich Validation
 
 on:
   schedule:
-    # 05:00 UTC nightly — leaves ~1h buffer after late-night main merges so
-    # docker.yml has time to publish :main before we pull it.
     - cron: '0 5 * * *'
   workflow_dispatch:
-    inputs:
-      gallery_image:
-        description: 'Gallery server image tag to test (default: ghcr.io/open-noodle/immich-server:main)'
-        required: false
   pull_request:
     # Only run on PRs that actually change something this workflow validates,
     # so unrelated PRs don't pay the ~10min boot/pull cost on every push.
@@ -41,7 +35,7 @@ jobs:
   validate:
     name: Validate revert-to-immich.sql
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 60
     env:
       # Lifted verbatim from docker/docker-compose.yml so the test runs the
       # same images a user would run in production.
@@ -51,13 +45,14 @@ jobs:
       DB_USERNAME: postgres
       DB_PASSWORD: postgres
       DB_DATABASE_NAME: immich
-      # Single source of truth for the Gallery image tag. Scheduled runs get
-      # the ':main' fallback; manual dispatches can override via input.
-      GALLERY_IMAGE: ${{ inputs.gallery_image || 'ghcr.io/open-noodle/immich-server:main' }}
+      GALLERY_IMAGE: gallery-revert-validation:${{ github.sha }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
 
       - name: Verify migration coverage
         env:
@@ -109,14 +104,47 @@ jobs:
 
           exit "$missing"
 
-      - name: Log in to GitHub Container Registry
-        # Cheap belt-and-braces in case open-noodle/* packages ever go
-        # private. No-op for public packages.
-        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+      - name: Prepare candidate image identity
+        run: |
+          jq --arg repository "$GITHUB_REPOSITORY" \
+            --arg registry "ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" \
+            --arg server_image "${GITHUB_REPOSITORY#*/}-server" '
+              .repository.name = $repository |
+              .repository.url = ("https://github.com/" + $repository) |
+              .repository.issues_url = ("https://github.com/" + $repository + "/issues/new") |
+              .repository.releases_url = ("https://github.com/" + $repository + "/releases") |
+              .docker.registry = $registry |
+              .docker.server_image = $server_image
+            ' branding/config.json > "$RUNNER_TEMP/revert-branding.json"
+          mv "$RUNNER_TEMP/revert-branding.json" branding/config.json
+
+      - name: Apply branding to candidate checkout
+        uses: ./.github/actions/apply-branding
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2
+
+      - name: Build checked-out Gallery candidate
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          context: .
+          file: server/Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: ${{ env.GALLERY_IMAGE }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          build-args: |
+            BUILD_ID=${{ github.run_id }}
+            BUILD_IMAGE=${{ env.GALLERY_IMAGE }}
+            BUILD_SOURCE_REF=${{ github.ref }}
+            BUILD_SOURCE_COMMIT=${{ github.sha }}
+          secrets: |
+            github_token=${{ github.token }}
+          cache-from: type=gha,scope=revert-validation-amd64
+          cache-to: type=gha,scope=revert-validation-amd64,mode=max
 
       - name: Run validation
         # Everything below lives in one shell so bash variables and the
@@ -148,10 +176,8 @@ jobs:
           boot_server() {
             local image=$1
             local phase=$2
-            echo "::group::${phase}: pull ${image}"
-            docker pull "$image"
-            echo "::endgroup::"
-            docker run -d \
+            echo "::notice::${phase}: boot ${image}"
+            docker run -d --pull=never \
               --name server \
               --network "$NETWORK_NAME" \
               -p 2283:2283 \
@@ -250,6 +276,8 @@ jobs:
           UPSTREAM_TAG=v$(jq -r '.upstream.version' branding/config.json)
           echo "Testing revert against upstream Immich ${UPSTREAM_TAG} (from branding/config.json)"
           echo "Gallery image: ${GALLERY_IMAGE}"
+          docker image inspect "$GALLERY_IMAGE" > /dev/null
+          docker pull "ghcr.io/immich-app/immich-server:${UPSTREAM_TAG}"
 
           ############################################################
           # Step 3.5: prepare /data with .immich marker files
