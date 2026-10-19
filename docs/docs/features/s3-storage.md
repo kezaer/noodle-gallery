@@ -6,6 +6,8 @@ Gallery can store new uploads in S3-compatible object storage instead of on loca
 If you have existing files on disk, you can migrate them to S3 using the built-in [Storage Migration](/features/storage-migration) tool.
 :::
 
+For opt-in multipart uploads from the browser and shared original retention during processing, see [Enable direct S3 uploads and retain originals for processing](/features/s3-upload-pipeline).
+
 ## How It Works
 
 When S3 storage is enabled:

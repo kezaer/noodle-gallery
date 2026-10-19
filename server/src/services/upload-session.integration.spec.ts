@@ -24,7 +24,10 @@ import { LoggingRepository } from 'src/repositories/logging.repository.js';
 import { UploadTransferRepository } from 'src/repositories/upload-transfer.repository.js';
 import 'src/schema/index.js';
 import { down, up } from 'src/schema/migrations-gallery/1798000000000-AddUploadTransfers.js';
-import { up as fenceStages } from 'src/schema/migrations-gallery/1798100000000-FenceOriginalStageGenerations.js';
+import {
+  down as unfenceStages,
+  up as fenceStages,
+} from 'src/schema/migrations-gallery/1798100000000-FenceOriginalStageGenerations.js';
 import { BaseService } from 'src/services/base.service.js';
 import { JobService } from 'src/services/job.service.js';
 import { OriginalStageService } from 'src/services/original-stage.service.js';
@@ -631,6 +634,10 @@ describe.skipIf(!enabled)('upload sessions with PostgreSQL and MinIO', () => {
 
   it('refuses rollback while active and preserves committed assets after a drained rollback', async () => {
     const session = await upload();
+    await expect(db.transaction().execute((tx) => unfenceStages(tx))).rejects.toThrow('Drain uploads');
+    const columns = await sql<{ column_name: string }>`SELECT column_name FROM information_schema.columns
+      WHERE table_name = 'gallery_original_stage' AND column_name = 'generation'`.execute(db);
+    expect(columns.rows).toEqual([{ column_name: 'generation' }]);
     await expect(db.transaction().execute((tx) => down(tx))).rejects.toThrow('Drain uploads');
     const completed = await complete(session.id);
     expect(completed.state).toBe('committed');
@@ -638,6 +645,7 @@ describe.skipIf(!enabled)('upload sessions with PostgreSQL and MinIO', () => {
       await repo.finishJob(record.token, 'success');
     }
     await stages.reconcile();
+    await db.transaction().execute((tx) => unfenceStages(tx));
     await db.transaction().execute((tx) => down(tx));
     expect(await db.selectFrom('asset').selectAll().execute()).toHaveLength(1);
     const owner = await db
