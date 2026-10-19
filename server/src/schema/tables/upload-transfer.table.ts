@@ -47,6 +47,7 @@ export class GalleryUploadReservationTable {
 @Table('gallery_original_stage')
 @Check({ name: 'gallery_original_stage_bytes_check', expression: 'bytes > 0' })
 export class GalleryOriginalStageTable {
+  @Column({ type: 'uuid', default: () => 'gen_random_uuid()' }) generation!: Generated<string>;
   @PrimaryColumn({ type: 'uuid' }) assetId!: string;
   @Column({ type: 'text', unique: true, uniqueConstraintName: 'gallery_original_stage_key_key' }) key!: string;
   @Column({ type: 'double precision' }) bytes!: number;

@@ -6,6 +6,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Readable } from 'node:stream';
 import { GenericContainer, type StartedTestContainer, Wait } from 'testcontainers';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { S3StorageBackend } from 'src/backends/s3-storage.backend.js';
@@ -20,6 +21,7 @@ import { LoggingRepository } from 'src/repositories/logging.repository.js';
 import { UploadTransferRepository } from 'src/repositories/upload-transfer.repository.js';
 import 'src/schema/index.js';
 import { down, up } from 'src/schema/migrations-gallery/1798000000000-AddUploadTransfers.js';
+import { up as fenceStages } from 'src/schema/migrations-gallery/1798100000000-FenceOriginalStageGenerations.js';
 import { JobService } from 'src/services/job.service.js';
 import { OriginalStageService } from 'src/services/original-stage.service.js';
 import { StorageService } from 'src/services/storage.service.js';
@@ -91,6 +93,7 @@ describe.skipIf(!enabled)('upload sessions with PostgreSQL and MinIO', () => {
     `.execute(db);
     const migrationDb = new Kysely<unknown>(getKyselyConfig(connection));
     await up(migrationDb);
+    await fenceStages(migrationDb);
     await migrationDb.destroy();
     await sql`INSERT INTO "user"(id) VALUES (${ownerId}::uuid)`.execute(db);
     const minio = await new GenericContainer(
@@ -323,6 +326,61 @@ describe.skipIf(!enabled)('upload sessions with PostgreSQL and MinIO', () => {
       .where('token', '=', record.token)
       .executeTakeFirstOrThrow();
     expect(state.state).toBe(terminal);
+  });
+
+  it('keeps a pinned replacement when a verifier fails after losing its stage generation', async () => {
+    const session = await upload();
+    const row = await repo.get(session.id);
+    if (!row || row.progress.kind !== 'uploading') throw new Error('Expected an open multipart session');
+    await backend.completeMultipart(
+      row.key,
+      row.progress.uploadId,
+      await backend.listMultipartParts(row.key, row.progress.uploadId),
+    );
+    const oldToken = await stages.reserve(row.assetId, row.key, contents.length);
+    if (!oldToken) throw new Error('Expected stage reservation');
+    const { promise: started, resolve: markStarted } = Promise.withResolvers<void>();
+    const { promise: blocked, reject: failStream } = Promise.withResolvers<void>();
+    const stream = Readable.from(
+      (async function* () {
+        markStarted?.();
+        yield contents.subarray(0, 8);
+        await blocked;
+      })(),
+    );
+    const get = vi.spyOn(backend, 'get').mockResolvedValueOnce({ stream });
+    const verifying = stages.verify(
+      row.assetId,
+      row.key,
+      { bytes: contents.length, digest: intent.checksum },
+      oldToken,
+    );
+    await started;
+    await db
+      .updateTable('gallery_original_stage')
+      .set({ claimUntil: new Date(0) })
+      .where('assetId', '=', row.assetId)
+      .execute();
+    const replacement = await stages.verify(row.assetId, row.key, { bytes: contents.length, digest: intent.checksum });
+    const reader = await stages.acquire(row.key);
+    expect(reader?.localPath).toBe(replacement.stagePath);
+    const failure = expect(verifying).rejects.toThrow('stale verifier failed');
+    failStream?.(new Error('stale verifier failed'));
+    await failure;
+    const current = await db
+      .selectFrom('gallery_original_stage')
+      .selectAll()
+      .where('assetId', '=', row.assetId)
+      .executeTakeFirstOrThrow();
+    expect(current.path).toBe(replacement.stagePath);
+    expect(current.retained).toBe(true);
+    const bytes = await readFile(reader!.localPath);
+    expect(bytes.equals(contents)).toBe(true);
+    expect(
+      await db.selectFrom('gallery_stage_pin').selectAll().where('assetId', '=', row.assetId).execute(),
+    ).toHaveLength(1);
+    await reader?.cleanup();
+    get.mockRestore();
   });
 
   it('keeps the control-table schema equal to its migration', async () => {

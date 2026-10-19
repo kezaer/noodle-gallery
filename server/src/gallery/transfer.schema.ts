@@ -31,6 +31,7 @@ export type TransferDatabase = DB & {
   };
   gallery_original_stage: {
     assetId: string;
+    generation: Generated<string>;
     key: string;
     bytes: number;
     path: string | null;

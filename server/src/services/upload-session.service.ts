@@ -254,7 +254,7 @@ export class UploadSessionService implements OnModuleDestroy {
       await this.backend().abortMultipart(session.key, progress.cleanup.uploadId);
     }
     await this.backend().delete(session.key);
-    await this.stages.discard(session.assetId);
+    await this.stages.discard(session.assetId, { kind: 'uncommitted' });
     await this.transfers.update(
       session.id,
       progress.kind === 'duplicate' ? { ...progress, cleanup: 'done' } : { ...progress, cleanup: { kind: 'done' } },

@@ -12,6 +12,8 @@ export type LocalOriginal = { localPath: string; cleanup: () => Promise<void> };
 export type VerifiedOriginal = { bytes: number; digest: string; stagePath: string | null };
 export class InvalidOriginalError extends Error {}
 
+type StageDiscard = { kind: 'generation'; token: string } | { kind: 'uncommitted' };
+
 @Injectable()
 export class OriginalStageService {
   constructor(
@@ -54,6 +56,7 @@ export class OriginalStageService {
       }
       const record = {
         assetId,
+        generation: token,
         key,
         bytes,
         path: null,
@@ -87,7 +90,9 @@ export class OriginalStageService {
         await mkdir(this.directory, { recursive: true });
         output = await open(partial, 'wx');
       } catch {
-        await this.discard(assetId);
+        if (token) {
+          await this.discard(assetId, { kind: 'generation', token });
+        }
       }
     }
     const hash = createHash('sha1');
@@ -125,7 +130,9 @@ export class OriginalStageService {
             if (partial) {
               await rm(partial, { force: true });
             }
-            await this.discard(assetId);
+            if (token) {
+              await this.discard(assetId, { kind: 'generation', token });
+            }
           }
         }
       }
@@ -163,7 +170,9 @@ export class OriginalStageService {
       if (partial) {
         await rm(partial, { force: true });
       }
-      await this.discard(assetId);
+      if (token) {
+        await this.discard(assetId, { kind: 'generation', token });
+      }
       throw error;
     } finally {
       if (heartbeat) {
@@ -190,7 +199,9 @@ export class OriginalStageService {
       return true;
     } catch {
       await rm(path, { force: true });
-      await this.discard(assetId);
+      if (token) {
+        await this.discard(assetId, { kind: 'generation', token });
+      }
       return false;
     }
   }
@@ -253,6 +264,7 @@ export class OriginalStageService {
               .updateTable('gallery_original_stage')
               .set({ path: null, retained: false })
               .where('assetId', '=', stage.assetId)
+              .where('path', '=', stage.path)
               .execute();
           }
         }
@@ -311,14 +323,26 @@ export class OriginalStageService {
     }
   }
 
-  async discard(assetId: string) {
+  async discard(assetId: string, ownership: StageDiscard) {
     const row = await this.transfers.db.transaction().execute(async (tx) => {
       const existing = await tx
         .selectFrom('gallery_original_stage')
-        .select('path')
+        .select(['path', 'generation'])
         .where('assetId', '=', assetId)
         .forUpdate()
         .executeTakeFirst();
+      if (!existing || (ownership.kind === 'generation' && existing.generation !== ownership.token)) {
+        return;
+      }
+      const activePin = await tx
+        .selectFrom('gallery_stage_pin')
+        .select('token')
+        .where('assetId', '=', assetId)
+        .where('expiresAt', '>', new Date())
+        .executeTakeFirst();
+      if (activePin) {
+        return;
+      }
       await tx
         .updateTable('gallery_original_stage')
         .set({ path: null, retained: false, claimToken: null, claimUntil: null })

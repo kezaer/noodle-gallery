@@ -474,7 +474,7 @@ export class AssetMediaService extends BaseService {
         if (quotaAccounted) {
           await this.userRepository.updateUsage(ownerId, -file.size);
         }
-        await this.originalStages?.discard(asset.id);
+        await this.originalStages?.discard(asset.id, { kind: 'uncommitted' });
         await this.assetRepository.remove({ id: asset.id });
         for (const file of backendFiles) {
           try {
