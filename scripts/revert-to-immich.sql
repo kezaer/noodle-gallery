@@ -82,6 +82,55 @@ BEGIN
   END IF;
 END $$;
 
+DO $$
+DECLARE
+  transfer_tables_present int;
+BEGIN
+  SELECT count(*) INTO transfer_tables_present
+    FROM unnest(ARRAY[
+      'public.gallery_upload_session', 'public.gallery_upload_reservation',
+      'public.gallery_original_stage', 'public.gallery_upload_job',
+      'public.gallery_stage_pin', 'public.gallery_upload_workflow'
+    ]) AS table_name
+   WHERE to_regclass(table_name) IS NOT NULL;
+
+  IF transfer_tables_present = 0 THEN
+    RETURN;
+  END IF;
+  IF transfer_tables_present <> 6 THEN
+    RAISE EXCEPTION 'revert-to-immich refused: incomplete upload transfer schema; restore the complete schema before draining transfers.';
+  END IF;
+
+  LOCK TABLE public.gallery_upload_session, public.gallery_upload_reservation,
+    public.gallery_original_stage, public.gallery_upload_job,
+    public.gallery_stage_pin, public.gallery_upload_workflow IN ACCESS EXCLUSIVE MODE;
+
+  IF EXISTS (
+    SELECT 1 FROM public.gallery_upload_session
+     WHERE COALESCE(progress->>'kind', '') NOT IN ('committed', 'duplicate', 'rejected', 'aborted', 'expired')
+        OR "claimUntil" > now()
+        OR progress->>'cleanup' = 'pending'
+        OR progress->'cleanup'->>'kind' = 'pending'
+        OR (progress->>'kind' = 'committed' AND
+          ("eventDelivered" IS DISTINCT FROM true OR "workflowsSnapshotted" IS DISTINCT FROM true))
+        OR (progress->>'kind' = 'duplicate' AND COALESCE(progress->>'cleanup', '') <> 'done')
+        OR (progress->>'kind' IN ('rejected', 'aborted', 'expired') AND
+          COALESCE(progress->'cleanup'->>'kind', '') <> 'done')
+  ) OR EXISTS (
+    SELECT 1 FROM public.gallery_upload_job WHERE COALESCE(state, '') NOT IN ('success', 'skipped', 'failed')
+  ) OR EXISTS (
+    SELECT 1 FROM public.gallery_stage_pin WHERE "expiresAt" IS NULL OR "expiresAt" > now()
+  ) OR EXISTS (
+    SELECT 1 FROM public.gallery_original_stage WHERE retained IS DISTINCT FROM false OR "claimUntil" > now()
+  ) OR EXISTS (
+    SELECT 1 FROM public.gallery_upload_workflow WHERE accepted IS DISTINCT FROM true
+  ) OR EXISTS (
+    SELECT 1 FROM public.gallery_upload_reservation WHERE "expiresAt" IS NULL OR "expiresAt" > now()
+  ) THEN
+    RAISE EXCEPTION 'revert-to-immich refused: drain uploads, dispatch, processing, reservations and stages before reverting; repair malformed transfer state before retrying.';
+  END IF;
+END $$;
+
 -- -----------------------------------------------------------------------------
 -- 1. Drop Gallery-only triggers on Immich-native tables.
 --
@@ -196,6 +245,13 @@ DROP TABLE IF EXISTS "asset_duplicate_checksum" CASCADE;
 -- backfilled from this table in step 1b above before it is dropped here.
 DROP TABLE IF EXISTS "asset_favorite_audit" CASCADE;
 DROP TABLE IF EXISTS "asset_favorite" CASCADE;
+
+DROP TABLE IF EXISTS "gallery_upload_workflow" CASCADE;
+DROP TABLE IF EXISTS "gallery_stage_pin" CASCADE;
+DROP TABLE IF EXISTS "gallery_upload_job" CASCADE;
+DROP TABLE IF EXISTS "gallery_original_stage" CASCADE;
+DROP TABLE IF EXISTS "gallery_upload_reservation" CASCADE;
+DROP TABLE IF EXISTS "gallery_upload_session" CASCADE;
 
 -- -----------------------------------------------------------------------------
 -- 3. Drop Gallery-only functions.
@@ -565,6 +621,8 @@ DELETE FROM "kysely_migrations"
   '1794100000000-DropAssetIsFavoriteColumn',
   '1796000000000-AddAssetFaceCreatedBy',
   '1797000000000-AddAssetLocalDateTimeIndex',
+  '1798000000000-AddUploadTransfers',
+  '1798100000000-FenceOriginalStageGenerations',
   -- Build-time compatibility alias (server/bin/sync-gallery-migrations.mjs): this migration was
   -- renumbered off 1793000000000 when fork PR #1060 took that timestamp, but rolling RC instances
   -- had already recorded the pre-rename name. Drop that row too, or upstream's migrator aborts
@@ -640,7 +698,8 @@ BEGIN
       OR "name" LIKE '%AddFaceRepairLock%'
       OR "name" LIKE '%AddFaceRepairScanFlaggedFace%'
       OR "name" LIKE '%AddFaceRepairScanInFlightIndex%'
-      OR "name" LIKE '%AssetFavoriteTables%';
+      OR "name" LIKE '%AssetFavoriteTables%'
+      OR "name" IN ('1798000000000-AddUploadTransfers', '1798100000000-FenceOriginalStageGenerations');
   IF fork_rows_left > 0 THEN
     RAISE EXCEPTION 'revert-to-immich: % Gallery row(s) still present in kysely_migrations after cleanup — aborting.', fork_rows_left;
   END IF;
@@ -670,7 +729,9 @@ BEGIN
        'face_person_verdict', 'face_repair_scan', 'face_repair_decline',
        'face_repair_scan_flagged_face', 'face_repair_lock',
        'pet_search',
-       'asset_favorite_audit', 'asset_favorite'
+       'asset_favorite_audit', 'asset_favorite',
+       'gallery_upload_workflow', 'gallery_stage_pin', 'gallery_upload_job',
+       'gallery_original_stage', 'gallery_upload_reservation', 'gallery_upload_session'
      );
   IF fork_tables_left > 0 THEN
     RAISE EXCEPTION 'revert-to-immich: % Gallery table(s) still present after cleanup — aborting.', fork_tables_left;
