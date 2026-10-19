@@ -1,0 +1,185 @@
+name: Verify and build fork RC
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Application version, for example v5.8.0-fork.rc.0"
+        required: true
+        type: string
+      publish:
+        description: "Publish the verified server image to this fork owner on GHCR"
+        required: true
+        type: boolean
+        default: false
+
+concurrency:
+  group: fork-rc-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  verify:
+    if: github.repository == 'kezaer/noodle-gallery'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout dispatched commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Validate fork version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-fork\.rc\.[0-9]+$ ]]; then
+            echo '::error::Use v<major>.<minor>.<patch>-fork.rc.<number>.'
+            exit 1
+          fi
+
+      - name: Set up pinned repository tools
+        uses: immich-app/devtools/actions/use-mise@06a9ef925332c91be647d6256642b86b398592c8
+        with:
+          github_token: ${{ github.token }}
+
+      - name: Verify server
+        run: mise run //server:ci-unit
+
+      - name: Verify web
+        run: mise run //web:checklist
+
+      - name: Verify generated TypeScript API
+        run: |
+          mise run //server:build
+          mise run //server:sync-open-api
+          mise run open-api-typescript
+          git diff --exit-code -- open-api/immich-openapi-specs.json packages/sdk
+
+      - name: Verify Gallery migration manifest
+        run: pnpm --filter immich migrations:verify-order:gallery
+
+  build:
+    needs: verify
+    if: github.repository == 'kezaer/noodle-gallery'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout verified commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Prepare fork image identity
+        id: image
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}-server"
+          tag="rc-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "name=$image" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          jq --arg repository "$GITHUB_REPOSITORY" \
+            --arg registry "ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" \
+            --arg server_image "${GITHUB_REPOSITORY#*/}-server" '
+              .repository.name = $repository |
+              .repository.url = ("https://github.com/" + $repository) |
+              .repository.issues_url = ("https://github.com/" + $repository + "/issues/new") |
+              .repository.releases_url = ("https://github.com/" + $repository + "/releases") |
+              .docker.registry = $registry |
+              .docker.server_image = $server_image
+            ' branding/config.json > "$RUNNER_TEMP/fork-branding.json"
+          mv "$RUNNER_TEMP/fork-branding.json" branding/config.json
+
+      - name: Apply branding to build checkout
+        uses: ./.github/actions/apply-branding
+        with:
+          version: ${{ inputs.version }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2
+
+      - name: Log in to fork registry
+        if: inputs.publish
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ github.token }}
+
+      - name: Build server candidate
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: .
+          file: server/Dockerfile
+          platforms: linux/amd64
+          push: ${{ inputs.publish }}
+          load: ${{ !inputs.publish }}
+          tags: ${{ steps.image.outputs.name }}:${{ steps.image.outputs.tag }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ inputs.version }}
+          build-args: |
+            BUILD_ID=${{ github.run_id }}
+            BUILD_IMAGE=${{ steps.image.outputs.name }}
+            BUILD_SOURCE_REF=${{ github.ref }}
+            BUILD_SOURCE_COMMIT=${{ github.sha }}
+          secrets: |
+            github_token=${{ github.token }}
+          cache-from: type=gha,scope=fork-server-amd64
+          cache-to: type=gha,scope=fork-server-amd64,mode=max
+
+      - name: Record candidate identity
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          TAG: ${{ steps.image.outputs.tag }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          VERSION: ${{ inputs.version }}
+          PUBLISHED: ${{ inputs.publish }}
+        run: |
+          pull_reference=''
+          if [[ "$PUBLISHED" == true ]]; then
+            if [[ ! "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+              echo '::error::The published image has no valid digest.'
+              exit 1
+            fi
+            pull_reference="$IMAGE@$DIGEST"
+          else
+            docker image inspect "$IMAGE:$TAG" > /dev/null
+          fi
+          jq -n --arg commit "$GITHUB_SHA" --arg version "$VERSION" \
+            --arg image "$IMAGE" --arg tag "$TAG" --arg digest "$DIGEST" \
+            --arg pull_reference "$pull_reference" --argjson published "$PUBLISHED" \
+            --arg run_url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            '{commit: $commit, version: $version, image: $image, tag: $tag,
+              digest: $digest, published: $published, pull_reference: $pull_reference, run_url: $run_url}' \
+            > "$RUNNER_TEMP/fork-rc.json"
+          {
+            echo '## Fork server candidate'
+            echo
+            echo "Source commit: \`$GITHUB_SHA\`"
+            echo "Image tag: \`$IMAGE:$TAG\`"
+            if [[ "$PUBLISHED" == true ]]; then
+              echo "Pinned pull reference: \`$pull_reference\`"
+            else
+              echo 'Publishing was disabled. The built image exists only on this runner.'
+            fi
+            echo
+            echo 'This run does not deploy or prove the transfer acceptance scenarios.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save candidate metadata
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        with:
+          name: fork-rc-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fork-rc.json
+          if-no-files-found: error
+          retention-days: 30
