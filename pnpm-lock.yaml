@@ -10,7 +10,7 @@ overrides:
   sharp: ^0.35.3
   tsc-alias: 1.9.2
 
-packageExtensionsChecksum: sha256-W6pFzyf+6QXnV91iA6oob0OGVkergPXDN1afLgoF53k=
+packageExtensionsChecksum: sha256-U7b77c7emTsnGGUgxE7z1Cy8zaPOaLLG8m5UKFgyEs4=
 
 pnpmfileChecksum: sha256-un98do36L0wZyqsjcLozQ3YUadCAn2yz5bXcBbOuyDA=
 
@@ -3631,6 +3631,8 @@ packages:
 
   '@koddsson/eslint-plugin-tscompat@0.2.0':
     resolution: {integrity: sha512-Oqd4kWSX0LiO9wWHjcmDfXZNC7TotFV/tLRhwCFU3XUeb//KYvJ75c9OmeSJ+vBv5lkCeB+xYsqyNrBc5j18XA==}
+    peerDependencies:
+      typescript: '>=4.8.4 <6.1.0'
 
   '@kwsites/file-exists@1.1.1':
     resolution: {integrity: sha512-m9/5YGR18lIwxSFDwfE3oA7bWuq9kdau6ugN4H2rJeyhFQZcG9AgSHkQtSD15a8WvTgfz9aikZMrKPHvbpqFiw==}
@@ -17037,10 +17039,10 @@ snapshots:
       '@typescript-eslint/type-utils': 8.70.1(@typescript/typescript6@6.0.2)(eslint@10.11.0(jiti@2.7.0)(supports-color@8.1.1))(supports-color@8.1.1)
       '@typescript-eslint/utils': 8.70.1(@typescript/typescript6@6.0.2)(eslint@10.11.0(jiti@2.7.0)(supports-color@8.1.1))(supports-color@8.1.1)
       browserslist: 4.29.0
+      typescript: '@typescript/typescript6@6.0.2'
     transitivePeerDependencies:
       - eslint
       - supports-color
-      - typescript
 
   '@kwsites/file-exists@1.1.1(supports-color@8.1.1)':
     dependencies:
