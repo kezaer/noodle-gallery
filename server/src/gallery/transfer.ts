@@ -40,7 +40,16 @@ export type UploadSession = {
 export type UploadJobContext = { assetId: string; token: string };
 export const uploadJobContext = new AsyncLocalStorage<UploadJobContext>();
 export const uploadJobToken = (assetId: string, item: JobItem) =>
-  `gallery-upload-${assetId}-${createHash('sha256').update(JSON.stringify(item)).digest('hex')}`;
+  `gallery-upload-${assetId}-${createHash('sha256')
+    .update(
+      JSON.stringify(item, (_key, value: unknown) => {
+        if (value && typeof value === 'object' && !Array.isArray(value)) {
+          return Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)));
+        }
+        return value;
+      }),
+    )
+    .digest('hex')}`;
 
 export const uploadIsTerminal = (progress: UploadProgress) =>
   ['committed', 'duplicate', 'aborted', 'expired', 'rejected'].includes(progress.kind);

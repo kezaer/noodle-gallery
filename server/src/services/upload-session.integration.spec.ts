@@ -1,4 +1,5 @@
 import { CreateBucketCommand, S3Client } from '@aws-sdk/client-s3';
+import { schemaDiff, schemaFromCode, schemaFromDatabase } from '@immich/sql-tools';
 import { Test } from '@nestjs/testing';
 import { Kysely, sql } from 'kysely';
 import { createHash, randomUUID } from 'node:crypto';
@@ -10,20 +11,23 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { S3StorageBackend } from 'src/backends/s3-storage.backend.js';
 import { AuthDto } from 'src/dtos/auth.dto.js';
 import { UploadSessionCreateDto } from 'src/dtos/upload-session.dto.js';
-import { JobName } from 'src/enum.js';
+import { JobName, JobStatus, QueueName } from 'src/enum.js';
 import { TransferDatabase } from 'src/gallery/transfer.schema.js';
 import { ConfigRepository } from 'src/repositories/config.repository.js';
 import { EventRepository } from 'src/repositories/event.repository.js';
 import { JobRepository } from 'src/repositories/job.repository.js';
 import { LoggingRepository } from 'src/repositories/logging.repository.js';
 import { UploadTransferRepository } from 'src/repositories/upload-transfer.repository.js';
-import { up } from 'src/schema/migrations-gallery/1798000000000-AddUploadTransfers.js';
+import 'src/schema/index.js';
+import { down, up } from 'src/schema/migrations-gallery/1798000000000-AddUploadTransfers.js';
+import { JobService } from 'src/services/job.service.js';
 import { OriginalStageService } from 'src/services/original-stage.service.js';
 import { StorageService } from 'src/services/storage.service.js';
 import { UploadSessionService } from 'src/services/upload-session.service.js';
 import { getKyselyConfig } from 'src/utils/database.js';
 import { newConfigRepositoryMock } from 'test/repositories/config.repository.mock.js';
 import { newJobRepositoryMock } from 'test/repositories/job.repository.mock.js';
+import { newTestService } from 'test/utils.js';
 
 const enabled = process.env.IMMICH_TEST_DOCKER === 'true';
 
@@ -33,6 +37,7 @@ describe.skipIf(!enabled)('upload sessions with PostgreSQL and MinIO', () => {
   let backend: S3StorageBackend;
   let repo: UploadTransferRepository;
   let directory: string;
+  let databaseUrl: string;
   const config = newConfigRepositoryMock();
   const events = { emit: vi.fn<EventRepository['emit']>().mockResolvedValue(undefined) };
   const jobs = newJobRepositoryMock();
@@ -70,6 +75,7 @@ describe.skipIf(!enabled)('upload sessions with PostgreSQL and MinIO', () => {
       connectionType: 'url',
       url: `postgres://postgres:postgres@${postgres.getHost()}:${postgres.getMappedPort(5432)}/postgres`,
     } satisfies Parameters<typeof getKyselyConfig>[0];
+    databaseUrl = connection.url;
     db = new Kysely<TransferDatabase>(getKyselyConfig(connection));
     await sql`
       CREATE TABLE "user"(id uuid PRIMARY KEY, "quotaSizeInBytes" double precision, "quotaUsageInBytes" double precision NOT NULL DEFAULT 0);
@@ -294,5 +300,61 @@ describe.skipIf(!enabled)('upload sessions with PostgreSQL and MinIO', () => {
     const delivered = await repo.get(session.id);
     expect(delivered?.eventDelivered).toBe(true);
     expect(await db.selectFrom('asset').selectAll().execute()).toHaveLength(1);
+  });
+  it.each([
+    { response: undefined, terminal: 'success', rejects: false },
+    { response: JobStatus.Failed, terminal: 'accepted', rejects: true },
+  ])('records a tracked $response result as $terminal', async ({ response, terminal, rejects }) => {
+    const session = await upload();
+    await complete(session.id);
+    const [record] = await repo.pendingJobs();
+    const { sut, mocks } = newTestService(JobService, { transfers: repo });
+    mocks.job.run.mockResolvedValue(response);
+    const job = { ...record.item, id: record.token };
+    const promise = sut.onJobRun(QueueName.MetadataExtraction, job);
+    if (rejects) {
+      await expect(promise).rejects.toThrow('returned Failed');
+    } else {
+      await promise;
+    }
+    const state = await db
+      .selectFrom('gallery_upload_job')
+      .select('state')
+      .where('token', '=', record.token)
+      .executeTakeFirstOrThrow();
+    expect(state.state).toBe(terminal);
+  });
+
+  it('keeps the control-table schema equal to its migration', async () => {
+    const source = schemaFromCode({ overrides: true, namingStrategy: 'default' });
+    const target = await schemaFromDatabase({ connection: { connectionType: 'url', url: databaseUrl } });
+    for (const schema of [source, target]) {
+      schema.tables = schema.tables.filter((table) => table.name.startsWith('gallery_'));
+      schema.functions = [];
+      schema.enums = [];
+      schema.extensions = [];
+      schema.parameters = [];
+      schema.overrides = [];
+    }
+    expect(schemaDiff(source, target).items).toEqual([]);
+  });
+
+  it('refuses rollback while active and preserves committed assets after a drained rollback', async () => {
+    const session = await upload();
+    await expect(db.transaction().execute((tx) => down(tx))).rejects.toThrow('Drain uploads');
+    const completed = await complete(session.id);
+    expect(completed.state).toBe('committed');
+    for (const record of await repo.pendingJobs()) {
+      await repo.finishJob(record.token, 'success');
+    }
+    await stages.reconcile();
+    await db.transaction().execute((tx) => down(tx));
+    expect(await db.selectFrom('asset').selectAll().execute()).toHaveLength(1);
+    const owner = await db
+      .selectFrom('user')
+      .select('quotaUsageInBytes')
+      .where('id', '=', ownerId)
+      .executeTakeFirstOrThrow();
+    expect(owner.quotaUsageInBytes).toBe(contents.length);
   });
 });

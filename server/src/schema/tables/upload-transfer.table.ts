@@ -20,17 +20,17 @@ import { UserTable } from 'src/schema/tables/user.table.js';
 export class GalleryUploadSessionTable {
   @PrimaryColumn({ type: 'uuid' }) id!: string;
   @ForeignKeyColumn(() => UserTable, { onDelete: 'CASCADE', onUpdate: 'NO ACTION', index: false }) ownerId!: string;
-  @Column({ type: 'uuid', unique: true }) assetId!: string;
-  @Column({ type: 'text', unique: true }) key!: string;
+  @Column({ type: 'uuid', unique: true, uniqueConstraintName: 'gallery_upload_session_assetId_key' }) assetId!: string;
+  @Column({ type: 'text', unique: true, uniqueConstraintName: 'gallery_upload_session_key_key' }) key!: string;
   @Column({ type: 'jsonb' }) intent!: unknown;
   @Column({ type: 'jsonb' }) progress!: UploadProgress;
   @Column({ type: 'integer' }) partSize!: number;
   @Column({ type: 'timestamp with time zone' }) expiresAt!: Timestamp;
-  @Column({ default: false }) cancelRequested!: Generated<boolean>;
+  @Column({ type: 'boolean', default: false }) cancelRequested!: Generated<boolean>;
   @Column({ type: 'uuid', nullable: true }) claimToken!: string | null;
   @Column({ type: 'timestamp with time zone', nullable: true }) claimUntil!: Timestamp | null;
-  @Column({ default: false }) eventDelivered!: Generated<boolean>;
-  @Column({ default: false }) workflowsSnapshotted!: Generated<boolean>;
+  @Column({ type: 'boolean', default: false }) eventDelivered!: Generated<boolean>;
+  @Column({ type: 'boolean', default: false }) workflowsSnapshotted!: Generated<boolean>;
   @CreateDateColumn() updatedAt!: Generated<Timestamp>;
 }
 
@@ -48,13 +48,13 @@ export class GalleryUploadReservationTable {
 @Check({ name: 'gallery_original_stage_bytes_check', expression: 'bytes > 0' })
 export class GalleryOriginalStageTable {
   @PrimaryColumn({ type: 'uuid' }) assetId!: string;
-  @Column({ type: 'text', unique: true }) key!: string;
+  @Column({ type: 'text', unique: true, uniqueConstraintName: 'gallery_original_stage_key_key' }) key!: string;
   @Column({ type: 'double precision' }) bytes!: number;
   @Column({ type: 'text', nullable: true }) path!: string | null;
   @Column({ type: 'uuid', nullable: true }) claimToken!: string | null;
   @Column({ type: 'timestamp with time zone', nullable: true }) claimUntil!: Timestamp | null;
   @Column({ type: 'timestamp with time zone' }) expiresAt!: Timestamp;
-  @Column({ default: false }) retained!: Generated<boolean>;
+  @Column({ type: 'boolean', default: false }) retained!: Generated<boolean>;
   @CreateDateColumn() createdAt!: Generated<Timestamp>;
 }
 
@@ -87,5 +87,5 @@ export class GalleryUploadWorkflowTable {
   @ForeignKeyColumn(() => AssetTable, { onDelete: 'CASCADE', onUpdate: 'NO ACTION', primary: true, index: false })
   assetId!: string;
   @PrimaryColumn({ type: 'uuid' }) workflowId!: string;
-  @Column({ default: false }) accepted!: Generated<boolean>;
+  @Column({ type: 'boolean', default: false }) accepted!: Generated<boolean>;
 }

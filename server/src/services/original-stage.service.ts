@@ -270,6 +270,15 @@ export class OriginalStageService {
           }
           const reservedToken = await this.reserve(stage.assetId, key, stage.bytes);
           if (!reservedToken) {
+            const competing = await this.transfers.db
+              .selectFrom('gallery_original_stage')
+              .selectAll()
+              .where('assetId', '=', stage.assetId)
+              .executeTakeFirst();
+            if (competing?.claimUntil && competing.claimUntil > new Date()) {
+              stage = competing;
+              continue;
+            }
             await release();
             return;
           }

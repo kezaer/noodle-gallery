@@ -60,8 +60,22 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   `.execute(db);
 }
 
-export async function down(db: Kysely<unknown>): Promise<void> {
+export async function down<T>(db: Kysely<T>): Promise<void> {
   await sql`
+    LOCK TABLE gallery_upload_session, gallery_upload_reservation, gallery_original_stage,
+      gallery_upload_job, gallery_stage_pin, gallery_upload_workflow IN ACCESS EXCLUSIVE MODE;
+    DO $$ BEGIN
+      IF EXISTS (SELECT 1 FROM gallery_upload_session WHERE progress->>'kind' NOT IN
+          ('committed', 'duplicate', 'rejected', 'aborted', 'expired') OR progress->>'cleanup' = 'pending'
+          OR progress->'cleanup'->>'kind' = 'pending')
+        OR EXISTS (SELECT 1 FROM gallery_upload_job WHERE state IN ('pending', 'accepted'))
+        OR EXISTS (SELECT 1 FROM gallery_stage_pin WHERE "expiresAt" > now())
+        OR EXISTS (SELECT 1 FROM gallery_original_stage WHERE retained)
+        OR EXISTS (SELECT 1 FROM gallery_upload_reservation WHERE "expiresAt" > now())
+        OR EXISTS (SELECT 1 FROM gallery_upload_session WHERE progress->>'kind' = 'committed' AND NOT "eventDelivered")
+      THEN RAISE EXCEPTION 'Drain uploads, dispatch, processing, reservations and stages before reverting upload transfers';
+      END IF;
+    END $$;
     DROP TABLE gallery_upload_workflow;
     DROP TABLE gallery_stage_pin;
     DROP TABLE gallery_upload_job;

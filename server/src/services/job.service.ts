@@ -142,7 +142,10 @@ export class JobService extends BaseService {
         if (tracked && response === JobStatus.Failed) {
           throw new Error(`Upload processing job ${job.name} returned Failed`);
         }
-        await this.eventRepository.emit('JobSuccess', { job, response });
+        if (tracked) {
+          outcome = response === JobStatus.Skipped ? 'skipped' : 'success';
+        }
+        await this.eventRepository.emit('JobSuccess', { job, response: response ?? undefined });
         if (response && typeof response === 'string' && [JobStatus.Success, JobStatus.Skipped].includes(response)) {
           await this.onDone(job);
           outcome = response === JobStatus.Success ? 'success' : 'skipped';

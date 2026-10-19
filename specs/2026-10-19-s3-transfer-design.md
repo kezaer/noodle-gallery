@@ -1,0 +1,17 @@
+# Direct S3 uploads and original retention
+
+Gallery keeps `POST /assets` as its stock-compatible ingest path. An optional owner-only session API lets web clients upload multipart bytes directly to the private S3 bucket. Shared links, sidecars, and live-photo uploads continue through the existing endpoint.
+
+A session has a fixed server-generated object key and asset ID. PostgreSQL stores its exact byte count, SHA-1 intent, multipart manifest, verification result, quota reservation, final result, and dispatch state. Completion reads the actual object and computes its whole-file SHA-1 before publishing an asset. Multipart ETags remain opaque part identifiers. Verification therefore brings one original into the server, even though the browser sends no original bytes to the asset API.
+
+The server reserves quota under the owner row lock. The verified commit inserts the standard asset, metadata, favorite, EXIF size, usage charge, stored result, and metadata enqueue record in one transaction. Duplicate checks include the existing asset and duplicate-tombstone tables. The unchanged uniqueness constraint resolves the remaining race. A later complete call reads the stored result. Cancellation and commit take the session row lock, so aborting a committed session does not delete its asset.
+
+The verifier retains the bytes on disk when the optional stage budget permits. A legacy upload can retain a hard link to its Multer file after the S3 write. Every original-reading handler uses the existing `ensureLocalFile` boundary. That boundary pins a complete stage or uses the existing per-job scratch download. A missing stage has a database claim for a single concurrent refill. Partial writes do not become readable stages.
+
+`JobService` still decides the processing graph. Upload-origin jobs receive durable, stable enqueue records. Async-local provenance carries the upload asset into jobs produced during a handler or its awaited event callbacks. Only metadata, storage-template migration, thumbnails, smart search, video encoding, face and pet processing, OCR, and person thumbnails participate. Workflow actions and library-wide sweeps do not extend retention. The parent records its children before it can become terminal. The stage survives while any tracked node or active file pin remains. Successful handlers that return no value are terminal, as are explicit success and skip results. Returned failures and thrown errors retry up to three times before becoming exhausted failures.
+
+Asset-create dispatch is replayable. Direct uploads carry no file charge in that event. Their workflow boundary snapshots the matching enabled workflows once and records each accepted enqueue. Stable retained BullMQ job IDs cover a crash between enqueue and ledger acknowledgement. This boundary does not make an existing external workflow action exactly once if its worker dies after the action succeeds.
+
+Stage age and capacity are operational bounds. An expired or missing copy may require another S3 read. A full stage budget selects per-job scratch downloads. Exhausting the physical scratch filesystem can still prevent ExifTool, sharp, or FFmpeg from processing media. All processes that run upload jobs must share the persistent stage directory.
+
+The direct-upload and stage switches are independent and false by default. Disabling them keeps committed standard assets available. An image downgrade requires a drained transfer graph and a migration rollback. Disabling flags alone does not remove the new migration record from PostgreSQL.

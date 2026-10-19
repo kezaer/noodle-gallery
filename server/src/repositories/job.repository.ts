@@ -18,7 +18,7 @@ import { ImmichStartupError, getKeyByValue, getMethodNames } from 'src/utils/mis
 type JobMapItem = {
   jobName: JobName;
   queueName: QueueName;
-  handler: (job: JobOf<any>) => Promise<JobStatus>;
+  handler: (job: JobOf<any>) => Promise<JobStatus | void>;
   label: string;
 };
 
