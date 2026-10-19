@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { GenericContainer, type StartedTestContainer, Wait } from 'testcontainers';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { JobItem } from 'src/types.js';
 import { S3StorageBackend } from 'src/backends/s3-storage.backend.js';
 import { OnJob } from 'src/decorators.js';
 import { AuthDto } from 'src/dtos/auth.dto.js';
@@ -378,6 +379,62 @@ describe.skipIf(!enabled)('upload sessions with PostgreSQL and MinIO', () => {
       .executeTakeFirstOrThrow();
     expect(outcome.state).toBe('failed');
     expect(outcome.attempts).toBe(3);
+  });
+
+  it('dispatches stable workflow triggers while skipping terminal upload-processing jobs', async () => {
+    const session = await upload();
+    await complete(session.id);
+    const [record] = await repo.pendingJobs();
+    const workflowId = randomUUID();
+    const handled: Array<{ name: JobName; data: unknown }> = [];
+    class QueueHandlers {}
+    for (const name of Object.values(JobName)) {
+      const descriptor = {
+        value: (data: unknown) => {
+          handled.push({ name, data });
+          return Promise.resolve(JobStatus.Success);
+        },
+      };
+      Object.defineProperty(QueueHandlers.prototype, name, descriptor);
+      OnJob({ name, queue: QueueName.Workflow })(QueueHandlers.prototype, name, descriptor);
+    }
+    const module = await Test.createTestingModule({
+      providers: [
+        JobRepository,
+        QueueHandlers,
+        { provide: UploadTransferRepository, useValue: repo },
+        { provide: ConfigRepository, useValue: config },
+        { provide: EventRepository, useValue: events },
+        { provide: LoggingRepository, useValue: logger },
+      ],
+    }).compile();
+    try {
+      const actualJobs = module.get(JobRepository);
+      actualJobs.setup([QueueHandlers]);
+      const { sut } = newTestService(JobService, { transfers: repo, job: actualJobs });
+      const workflow = {
+        id: `gallery-upload-workflow-${record.assetId}-${workflowId}`,
+        name: JobName.WorkflowAssetTrigger,
+        data: { workflowId, assetId: record.assetId },
+      } satisfies JobItem & { id: string };
+      const processing = { ...record.item, id: record.token };
+
+      for (const state of ['success', 'skipped', 'failed'] as const) {
+        await repo.finishJob(record.token, state);
+        await sut.onJobRun(QueueName.MetadataExtraction, processing);
+        const terminal = await db
+          .selectFrom('gallery_upload_job')
+          .select(['state', 'attempts'])
+          .where('token', '=', record.token)
+          .executeTakeFirstOrThrow();
+        expect(terminal).toEqual({ state, attempts: 0 });
+      }
+      await sut.onJobRun(QueueName.Workflow, workflow);
+
+      expect(handled).toEqual([{ name: JobName.WorkflowAssetTrigger, data: { workflowId, assetId: record.assetId } }]);
+    } finally {
+      await module.close();
+    }
   });
 
   it('keeps a pinned replacement when a verifier fails after losing its stage generation', async () => {
