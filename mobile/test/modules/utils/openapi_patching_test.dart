@@ -25,6 +25,30 @@ void main() {
       expect(value['download']['includeEmbeddedVideos'], false);
     });
 
+    test('defaults missing direct upload capability to false', () {
+      final value = <String, Object?>{};
+
+      upgradeDto(value, 'ServerFeaturesDto');
+
+      expect(value['directUpload'], false);
+    });
+
+    test('preserves enabled direct upload capability', () {
+      final value = <String, Object?>{'directUpload': true};
+
+      upgradeDto(value, 'ServerFeaturesDto');
+
+      expect(value['directUpload'], true);
+    });
+
+    test('preserves disabled direct upload capability', () {
+      final value = <String, Object?>{'directUpload': false};
+
+      upgradeDto(value, 'ServerFeaturesDto');
+
+      expect(value['directUpload'], false);
+    });
+
     test('addDefault', () {
       final dynamic value = jsonDecode("""
 {

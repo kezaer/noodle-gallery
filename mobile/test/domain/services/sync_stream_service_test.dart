@@ -41,6 +41,7 @@ class _MockAbortCallbackWrapper extends Mock implements _AbortCallbackWrapper {}
 ServerFeaturesDto makeServerFeatures({Optional<List<String>?> syncRequestTypes = const Optional.absent()}) =>
     ServerFeaturesDto(
       configFile: false,
+      directUpload: false,
       duplicateDetection: false,
       email: false,
       facialRecognition: false,

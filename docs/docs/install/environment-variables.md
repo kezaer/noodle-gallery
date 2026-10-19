@@ -266,14 +266,14 @@ to use a Docker secret for the password in the Redis container.
 
 ## S3 upload sessions and original retention
 
-| Variable | Description | Default |
-| :-- | :-- | :-- |
-| `GALLERY_S3_DIRECT_UPLOAD_ENABLED` | Advertises owner upload sessions when the write backend is S3. Existing clients retain the ordinary upload endpoint. | `false` |
-| `GALLERY_ORIGINAL_STAGE_ENABLED` | Retains complete originals for upload-processing jobs. | `false` |
-| `GALLERY_ORIGINAL_STAGE_DIRECTORY` | Absolute shared persistent path for retained originals. | `original-stage` under `IMMICH_MEDIA_LOCATION` |
-| `GALLERY_ORIGINAL_STAGE_MAX_BYTES` | Positive integer limit for retained and reserved original bytes. | `10737418240` |
-| `GALLERY_ORIGINAL_STAGE_MAX_AGE_SECONDS` | Retention lifetime, from 60 through 604800 seconds. Active reader pins defer deletion. | `86400` |
-| `GALLERY_UPLOAD_SESSION_MAX_AGE_SECONDS` | Session and quota-reservation lifetime, from 60 through 604800 seconds. | `86400` |
-| `GALLERY_UPLOAD_PART_URL_TTL_SECONDS` | Signed part URL lifetime, from 60 through 3600 seconds. | `900` |
+| Variable                                 | Description                                                                                                          | Default                                        |
+| :--------------------------------------- | :------------------------------------------------------------------------------------------------------------------- | :--------------------------------------------- |
+| `GALLERY_S3_DIRECT_UPLOAD_ENABLED`       | Advertises owner upload sessions when the write backend is S3. Existing clients retain the ordinary upload endpoint. | `false`                                        |
+| `GALLERY_ORIGINAL_STAGE_ENABLED`         | Retains complete originals for upload-processing jobs.                                                               | `false`                                        |
+| `GALLERY_ORIGINAL_STAGE_DIRECTORY`       | Absolute shared persistent path for retained originals.                                                              | `original-stage` under `IMMICH_MEDIA_LOCATION` |
+| `GALLERY_ORIGINAL_STAGE_MAX_BYTES`       | Positive integer limit for retained and reserved original bytes.                                                     | `10737418240`                                  |
+| `GALLERY_ORIGINAL_STAGE_MAX_AGE_SECONDS` | Retention lifetime, from 60 through 604800 seconds. Active reader pins defer deletion.                               | `86400`                                        |
+| `GALLERY_UPLOAD_SESSION_MAX_AGE_SECONDS` | Session and quota-reservation lifetime, from 60 through 604800 seconds.                                              | `86400`                                        |
+| `GALLERY_UPLOAD_PART_URL_TTL_SECONDS`    | Signed part URL lifetime, from 60 through 3600 seconds.                                                              | `900`                                          |
 
 The two feature switches are independent. All server processes use the same settings and stage mount. See [Enable direct S3 uploads and retain originals for processing](/features/s3-upload-pipeline).
