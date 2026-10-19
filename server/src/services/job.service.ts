@@ -13,7 +13,7 @@ import {
   QueueName,
   SystemMetadataKey,
 } from 'src/enum.js';
-import { uploadJobContext } from 'src/gallery/transfer.js';
+import { uploadGraphJobs, uploadJobContext } from 'src/gallery/transfer.js';
 import { ArgsOf } from 'src/repositories/event.repository.js';
 import { BaseService } from 'src/services/base.service.js';
 import { hexOrBufferToBase64 } from 'src/utils/bytes.js';
@@ -132,7 +132,9 @@ export class JobService extends BaseService {
   @OnEvent({ name: 'JobRun' })
   async onJobRun(...[queueName, job]: ArgsOf<'JobRun'>) {
     const token =
-      'id' in job && typeof job.id === 'string' && job.id.startsWith('gallery-upload-') ? job.id : undefined;
+      uploadGraphJobs.has(job.name) && 'id' in job && typeof job.id === 'string' && job.id.startsWith('gallery-upload-')
+        ? job.id
+        : undefined;
     const tracked = token && this.transfers ? await this.transfers.startJob(token) : undefined;
     if (token && this.transfers && !tracked) {
       return;
