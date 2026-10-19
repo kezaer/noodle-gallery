@@ -83,6 +83,7 @@ import { ViewRepository } from 'src/repositories/view-repository.js';
 import { WebsocketRepository } from 'src/repositories/websocket.repository.js';
 import { WorkflowRepository } from 'src/repositories/workflow.repository.js';
 import { UserTable } from 'src/schema/tables/user.table.js';
+import { DerivativeCacheService } from 'src/services/derivative-cache.service.js';
 import { FaceAssignmentService } from 'src/services/face-assignment.service.js';
 import { IdentityMergePropagationService } from 'src/services/identity-merge-propagation.service.js';
 import { OriginalStageService } from 'src/services/original-stage.service.js';
@@ -257,6 +258,7 @@ export class BaseService {
     protected workflowRepository: WorkflowRepository,
     @Optional() protected transfers?: UploadTransferRepository,
     @Optional() protected originalStages?: OriginalStageService,
+    @Optional() protected derivativeCache?: DerivativeCacheService,
   ) {
     this.logger.setContext(this.constructor.name);
     this.storageCore = StorageCore.create(

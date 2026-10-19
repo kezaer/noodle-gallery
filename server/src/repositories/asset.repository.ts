@@ -2226,7 +2226,14 @@ export class AssetRepository {
       .leftJoin('asset_file', (join) =>
         join.onRef('asset.id', '=', 'asset_file.assetId').on('asset_file.type', 'in', types),
       )
-      .select(['asset.originalPath', 'asset.originalFileName', 'asset_file.path as path'])
+      .select([
+        'asset.originalPath',
+        'asset.originalFileName',
+        'asset_file.path as path',
+        'asset_file.updateId as fileUpdateId',
+        'asset_file.type as fileType',
+        'asset_file.isEdited as fileIsEdited',
+      ])
       .orderBy(sql`case when asset_file.type = ${type} then 0 else 1 end`)
       .orderBy('asset_file.isEdited', isEdited ? 'desc' : 'asc')
       .executeTakeFirstOrThrow();

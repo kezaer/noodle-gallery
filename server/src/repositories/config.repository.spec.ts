@@ -50,6 +50,9 @@ const resetEnv = () => {
     'IMMICH_S3_SERVE_MODE',
     'GALLERY_RANGED_METADATA_ENABLED',
     'GALLERY_RANGED_METADATA_MAX_BYTES',
+    'GALLERY_THUMBNAIL_CACHE_ENABLED',
+    'GALLERY_THUMBNAIL_CACHE_DIRECTORY',
+    'GALLERY_THUMBNAIL_CACHE_MAX_BYTES',
   ]) {
     delete process.env[env];
   }
@@ -110,6 +113,30 @@ describe('getEnv', () => {
     it('should throw an error for relative paths', () => {
       process.env.IMMICH_MEDIA_LOCATION = './relative/path';
       expect(() => getEnv()).toThrowError('[IMMICH_MEDIA_LOCATION] Must be an absolute path');
+    });
+  });
+
+  describe('thumbnail cache', () => {
+    it('is disabled by default with a bounded budget', () => {
+      expect(getEnv().thumbnailCache).toEqual({ enabled: false, directory: undefined, maxBytes: 1_073_741_824 });
+    });
+
+    it('parses independent cache settings', () => {
+      process.env.GALLERY_THUMBNAIL_CACHE_ENABLED = 'true';
+      process.env.GALLERY_THUMBNAIL_CACHE_DIRECTORY = '/data/private-cache';
+      process.env.GALLERY_THUMBNAIL_CACHE_MAX_BYTES = '1024';
+      expect(getEnv().thumbnailCache).toEqual({ enabled: true, directory: '/data/private-cache', maxBytes: 1024 });
+      expect(getEnv().transfer.stageEnabled).toBe(false);
+    });
+
+    it.each(['0', '-1', '1.5', 'NaN', '9007199254740992'])('rejects an invalid cache budget %s', (value) => {
+      process.env.GALLERY_THUMBNAIL_CACHE_MAX_BYTES = value;
+      expect(() => getEnv()).toThrow('[GALLERY_THUMBNAIL_CACHE_MAX_BYTES]');
+    });
+
+    it('requires an absolute cache directory', () => {
+      process.env.GALLERY_THUMBNAIL_CACHE_DIRECTORY = './relative';
+      expect(() => getEnv()).toThrow('[GALLERY_THUMBNAIL_CACHE_DIRECTORY] Must be an absolute path');
     });
   });
 

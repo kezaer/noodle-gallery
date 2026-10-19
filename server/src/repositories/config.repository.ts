@@ -126,6 +126,12 @@ export interface EnvData {
     partUrlTtlSeconds: number;
   };
 
+  thumbnailCache: {
+    enabled: boolean;
+    directory?: string;
+    maxBytes: number;
+  };
+
   storage: {
     backend: 'disk' | 's3';
     ignoreMountCheckErrors: boolean;
@@ -389,6 +395,12 @@ const getEnv = (): EnvData => {
       stageDirectory: dto.GALLERY_ORIGINAL_STAGE_DIRECTORY,
       sessionMaxAgeSeconds: dto.GALLERY_UPLOAD_SESSION_MAX_AGE_SECONDS ?? 86_400,
       partUrlTtlSeconds: dto.GALLERY_UPLOAD_PART_URL_TTL_SECONDS ?? 900,
+    },
+
+    thumbnailCache: {
+      enabled: dto.GALLERY_THUMBNAIL_CACHE_ENABLED ?? false,
+      directory: dto.GALLERY_THUMBNAIL_CACHE_DIRECTORY,
+      maxBytes: dto.GALLERY_THUMBNAIL_CACHE_MAX_BYTES ?? 1024 ** 3,
     },
 
     storage: {

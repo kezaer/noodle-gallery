@@ -1409,7 +1409,10 @@ where
 select
   "asset"."originalPath",
   "asset"."originalFileName",
-  "asset_file"."path" as "path"
+  "asset_file"."path" as "path",
+  "asset_file"."updateId" as "fileUpdateId",
+  "asset_file"."type" as "fileType",
+  "asset_file"."isEdited" as "fileIsEdited"
 from
   "asset"
   left join "asset_file" on "asset"."id" = "asset_file"."assetId"

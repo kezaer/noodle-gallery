@@ -89,6 +89,7 @@ import { WorkflowRepository } from 'src/repositories/workflow.repository.js';
 import { DB } from 'src/schema/index.js';
 import { AuthService } from 'src/services/auth.service.js';
 import { BaseService } from 'src/services/base.service.js';
+import { DerivativeCacheService } from 'src/services/derivative-cache.service.js';
 import { OriginalStageService } from 'src/services/original-stage.service.js';
 import { getKyselyConfig } from 'src/utils/database.js';
 import { ClusterGroupFactory } from 'test/factories/cluster-group.factory.js';
@@ -434,6 +435,7 @@ export const newTestService = <T extends BaseService>(
   overrides: Partial<ServiceOverrides> & {
     transfers?: UploadTransferRepository;
     originalStages?: OriginalStageService;
+    derivativeCache?: DerivativeCacheService;
   } = {},
 ) => {
   const mocks = getMocks();
@@ -507,6 +509,7 @@ export const newTestService = <T extends BaseService>(
     overrides.workflow || (mocks.workflow as As<WorkflowRepository>),
     overrides.transfers,
     overrides.originalStages,
+    overrides.derivativeCache,
   );
 
   return {

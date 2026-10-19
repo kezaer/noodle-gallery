@@ -37,7 +37,12 @@ import { StorageService } from 'src/services/storage.service.js';
 import { requireUploadAccess } from 'src/utils/access.js';
 import { asUploadRequest, onBeforeLink } from 'src/utils/asset.util.js';
 import { isAssetChecksumConstraint } from 'src/utils/database.js';
-import { ImmichMediaResponse, getFileNameWithoutExtension, getFilenameExtension } from 'src/utils/file.js';
+import {
+  ImmichMediaResponse,
+  ImmichStreamResponse,
+  getFileNameWithoutExtension,
+  getFilenameExtension,
+} from 'src/utils/file.js';
 import { mimeTypes } from 'src/utils/mime-types.js';
 import { fromChecksum } from 'src/utils/request.js';
 
@@ -226,11 +231,8 @@ export class AssetMediaService extends BaseService {
     }
 
     const size = (dto.size ?? AssetMediaSize.THUMBNAIL) as unknown as AssetFileType;
-    const { originalPath, originalFileName, path } = await this.assetRepository.getForThumbnail(
-      id,
-      size,
-      dto.edited ?? false,
-    );
+    const { originalPath, originalFileName, path, fileUpdateId, fileType, fileIsEdited } =
+      await this.assetRepository.getForThumbnail(id, size, dto.edited ?? false);
 
     if (size === AssetFileType.FullSize && mimeTypes.isWebSupportedImage(originalPath) && !dto.edited) {
       // use original file for web supported images
@@ -250,6 +252,36 @@ export class AssetMediaService extends BaseService {
     const fileNameBase =
       auth.sharedLink && !auth.sharedLink.showExif ? id : getFileNameWithoutExtension(originalFileName);
     const fileName = `${fileNameBase}_${size}${getFilenameExtension(path)}`;
+
+    if (
+      this.configRepository.getEnv().thumbnailCache?.enabled &&
+      this.derivativeCache &&
+      fileUpdateId &&
+      fileType &&
+      fileIsEdited !== null &&
+      (fileType === AssetFileType.Thumbnail || fileType === AssetFileType.Preview)
+    ) {
+      const cached = await this.derivativeCache.open(
+        {
+          assetId: id,
+          path,
+          type: fileType,
+          isEdited: fileIsEdited,
+          updateId: fileUpdateId,
+          size,
+          edited: dto.edited ?? false,
+        },
+        await this.backendFor(path),
+      );
+      if (cached) {
+        return new ImmichStreamResponse({
+          ...cached,
+          contentType: mimeTypes.lookup(path),
+          cacheControl: CacheControl.PrivateWithCache,
+          fileName,
+        });
+      }
+    }
 
     return this.serveFromBackend(path, mimeTypes.lookup(path), CacheControl.PrivateWithCache, fileName);
   }

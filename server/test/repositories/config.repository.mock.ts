@@ -85,6 +85,7 @@ export const envData: EnvData = {
     allow: true,
   },
 
+  thumbnailCache: { enabled: false, maxBytes: 1024 ** 3 },
   transfer: {
     directUploadEnabled: false,
     stageEnabled: false,
