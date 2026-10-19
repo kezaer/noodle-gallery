@@ -32,12 +32,12 @@ export class DerivativeCacheService implements OnModuleDestroy {
   private owner?: FileHandle;
   private allocated = 0;
   private stopping = false;
-  private readonly onExit = () => {
+  private readonly removeOwnerMarkerBestEffort = () => {
     if (this.owner) {
       try {
         rmSync(join(this.directory, '.owner'), { force: true });
       } catch {
-        // A stale marker keeps the next process on the storage backend.
+        return;
       }
     }
   };
@@ -95,7 +95,7 @@ export class DerivativeCacheService implements OnModuleDestroy {
     try {
       await mkdir(this.directory, { recursive: true, mode: 0o700 });
       this.owner = await open(join(this.directory, '.owner'), 'wx', 0o600);
-      process.once('exit', this.onExit);
+      process.once('exit', this.removeOwnerMarkerBestEffort);
       process.once('SIGTERM', this.onTerm);
       process.once('SIGINT', this.onInterrupt);
       await this.owner.writeFile(String(process.pid));
@@ -259,7 +259,7 @@ export class DerivativeCacheService implements OnModuleDestroy {
       await rm(join(this.directory, '.owner'), { force: true });
     } finally {
       this.owner = undefined;
-      process.removeListener('exit', this.onExit);
+      process.removeListener('exit', this.removeOwnerMarkerBestEffort);
       process.removeListener('SIGTERM', this.onTerm);
       process.removeListener('SIGINT', this.onInterrupt);
     }
@@ -271,7 +271,7 @@ export class DerivativeCacheService implements OnModuleDestroy {
     }
 
     this.stopping = true;
-    this.onExit();
+    this.removeOwnerMarkerBestEffort();
     process.kill(process.pid, signal);
   }
 

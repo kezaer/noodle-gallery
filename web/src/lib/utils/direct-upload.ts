@@ -152,20 +152,22 @@ export class DirectUploads {
     return this.#records().filter((record) => record.ownerId === ownerId);
   }
 
-  #save(records: RememberedUpload[]) {
+  #persistBestEffort(records: RememberedUpload[]) {
     try {
       this.storage().setItem(storageKey, JSON.stringify(records));
     } catch {
-      // A blocked or full browser store still permits an upload in this tab.
+      return;
     }
   }
 
   remember(record: RememberedUpload) {
-    this.#save([...this.#records().filter(({ id }) => id !== record.id), record]);
+    this.#persistBestEffort([...this.#records().filter(({ id }) => id !== record.id), record]);
   }
 
   forget(record: RememberedUpload) {
-    this.#save(this.#records().filter(({ id, ownerId }) => id !== record.id || ownerId !== record.ownerId));
+    this.#persistBestEffort(
+      this.#records().filter(({ id, ownerId }) => id !== record.id || ownerId !== record.ownerId),
+    );
   }
 
   start(id: string) {
