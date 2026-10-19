@@ -1,12 +1,14 @@
 import { CreateBucketCommand, ListObjectsV2Command, S3Client } from '@aws-sdk/client-s3';
 import { existsSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { buffer } from 'node:stream/consumers';
 import { GenericContainer, type StartedTestContainer, Wait } from 'testcontainers';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { S3StorageBackend } from 'src/backends/s3-storage.backend.js';
 import { CacheControl } from 'src/enum.js';
 import { RangeNotSatisfiableError } from 'src/interfaces/storage-backend.interface.js';
+import { prepareRangedMetadata } from 'src/utils/ranged-metadata.js';
+import { rawMetadataMovie } from 'test/fixtures/ranged-metadata.js';
 
 const canRunDocker = process.env.IMMICH_TEST_DOCKER === 'true';
 
@@ -65,6 +67,34 @@ describe.skipIf(!canRunDocker)('S3StorageBackend integration (MinIO)', () => {
 
   afterAll(async () => {
     await container?.stop();
+  });
+
+  it('uses real bounded S3 ranges for an indexed raw MOV without downloading pixels', async () => {
+    const data = rawMetadataMovie();
+    const key = 'metadata/raw.mov';
+    await backend.put(key, data, { contentType: 'video/quicktime' });
+    const result = await prepareRangedMetadata(backend, key, 4096);
+    expect(result.kind).toBe('complete');
+    if (result.kind !== 'complete') {
+      throw new Error(result.reason);
+    }
+    try {
+      const stats = await stat(result.localPath);
+      const retained = await readFile(result.localPath);
+      expect(stats.size).toBe(data.length);
+      expect(result.bytes).toBe(data.length - 24);
+      expect(retained.subarray(0, -24)).toEqual(data.subarray(0, -24));
+      expect(retained.subarray(-24)).toEqual(Buffer.alloc(24));
+    } finally {
+      await result.cleanup();
+    }
+  });
+
+  it('returns a full-read decision for a real S3 MOV with unsupported compressed samples', async () => {
+    await backend.put('metadata/compressed.mov', rawMetadataMovie('avc1'));
+    await expect(prepareRangedMetadata(backend, 'metadata/compressed.mov', 4096)).resolves.toMatchObject({
+      kind: 'needsFullRead',
+    });
   });
 
   it('should round-trip a file through put and get', async () => {

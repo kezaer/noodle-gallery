@@ -117,6 +117,8 @@ export interface EnvData {
   transfer: {
     directUploadEnabled: boolean;
     stageEnabled: boolean;
+    rangedMetadataEnabled: boolean;
+    rangedMetadataMaxBytes: number;
     stageMaxBytes: number;
     stageMaxAgeSeconds: number;
     stageDirectory?: string;
@@ -380,6 +382,8 @@ const getEnv = (): EnvData => {
     transfer: {
       directUploadEnabled: dto.GALLERY_S3_DIRECT_UPLOAD_ENABLED ?? false,
       stageEnabled: dto.GALLERY_ORIGINAL_STAGE_ENABLED ?? false,
+      rangedMetadataEnabled: dto.GALLERY_RANGED_METADATA_ENABLED ?? false,
+      rangedMetadataMaxBytes: dto.GALLERY_RANGED_METADATA_MAX_BYTES ?? 4 * 1024 ** 2,
       stageMaxBytes: dto.GALLERY_ORIGINAL_STAGE_MAX_BYTES ?? 10 * 1024 ** 3,
       stageMaxAgeSeconds: dto.GALLERY_ORIGINAL_STAGE_MAX_AGE_SECONDS ?? 86_400,
       stageDirectory: dto.GALLERY_ORIGINAL_STAGE_DIRECTORY,

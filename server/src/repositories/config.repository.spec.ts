@@ -48,6 +48,8 @@ const resetEnv = () => {
     'IMMICH_S3_SECRET_ACCESS_KEY',
     'IMMICH_S3_PRESIGNED_URL_EXPIRY',
     'IMMICH_S3_SERVE_MODE',
+    'GALLERY_RANGED_METADATA_ENABLED',
+    'GALLERY_RANGED_METADATA_MAX_BYTES',
   ]) {
     delete process.env[env];
   }
@@ -89,6 +91,19 @@ describe('getEnv', () => {
 
     expect(config.plugins.external).toEqual({ allow: false });
     expect(config.setup).toEqual({ allow: true });
+    expect(config.transfer.rangedMetadataEnabled).toBe(false);
+    expect(config.transfer.rangedMetadataMaxBytes).toBe(4 * 1024 ** 2);
+  });
+
+  it('allows bounded metadata to be enabled independently from retained originals', () => {
+    process.env.GALLERY_RANGED_METADATA_ENABLED = 'true';
+    process.env.GALLERY_RANGED_METADATA_MAX_BYTES = '1048576';
+    expect(getEnv().transfer).toMatchObject({ rangedMetadataEnabled: true, rangedMetadataMaxBytes: 1_048_576 });
+  });
+
+  it.each(['0', '16777217', 'NaN'])('rejects an invalid metadata byte budget %s', (value) => {
+    process.env.GALLERY_RANGED_METADATA_MAX_BYTES = value;
+    expect(getEnv).toThrow('GALLERY_RANGED_METADATA_MAX_BYTES');
   });
 
   describe('IMMICH_MEDIA_LOCATION', () => {

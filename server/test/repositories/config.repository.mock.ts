@@ -88,6 +88,8 @@ export const envData: EnvData = {
   transfer: {
     directUploadEnabled: false,
     stageEnabled: false,
+    rangedMetadataEnabled: false,
+    rangedMetadataMaxBytes: 4 * 1024 ** 2,
     stageMaxBytes: 10 * 1024 ** 3,
     stageMaxAgeSeconds: 86_400,
     sessionMaxAgeSeconds: 86_400,

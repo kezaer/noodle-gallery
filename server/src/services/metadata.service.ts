@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { isAbsolute, join, parse } from 'node:path';
 import type { ArgOf } from 'src/repositories/event.repository.js';
 import type { JobOf } from 'src/types.js';
+import { S3StorageBackend } from 'src/backends/s3-storage.backend.js';
 import { StorageCore } from 'src/cores/storage.core.js';
 import { Asset, AssetFile } from 'src/database.js';
 import { OnEvent, OnJob } from 'src/decorators.js';
@@ -37,6 +38,7 @@ import { mergeTimeZone } from 'src/utils/date.js';
 import { parseDurationToSeconds } from 'src/utils/duration.js';
 import { mimeTypes } from 'src/utils/mime-types.js';
 import { batched, isFaceImportEnabled } from 'src/utils/misc.js';
+import { prepareRangedMetadata } from 'src/utils/ranged-metadata.js';
 import { upsertTags } from 'src/utils/tag.js';
 import { Tasks } from 'src/utils/tasks.js';
 
@@ -266,16 +268,46 @@ export class MetadataService extends BaseService {
       return;
     }
 
-    const { localPath: localOriginal, cleanup: cleanupOriginal } = await this.ensureLocalFile(asset.originalPath);
+    let original = await this.getMetadataOriginal(asset);
     try {
       const { sidecarFile } = getAssetFiles(asset.files);
       const localSidecar = sidecarFile ? await this.ensureLocalFile(sidecarFile.path) : undefined;
 
       try {
-        const [exifResult, stats] = await Promise.all([
-          this.getExifTags(asset, localOriginal, localSidecar?.localPath),
-          this.storageRepository.stat(localOriginal),
-        ]);
+        const readMetadata = () =>
+          Promise.all([
+            this.getExifTags(asset, original.localPath, localSidecar?.localPath),
+            this.storageRepository.stat(original.localPath),
+          ]);
+        let extracted: Awaited<ReturnType<typeof readMetadata>>;
+        try {
+          extracted = await readMetadata();
+          const [result] = extracted;
+          if (
+            original.kind === 'ranged' &&
+            (result.tags.FileType !== 'MOV' ||
+              (result.tags.errors?.length ?? 0) > 0 ||
+              result.video?.codecName !== 'rawvideo' ||
+              !result.video.width ||
+              !result.video.height ||
+              !result.video.timeBase ||
+              result.video.frameCount !== original.sampleCount ||
+              result.packets?.packetCount !== original.sampleCount ||
+              !result.format?.formatName)
+          ) {
+            throw new Error('Incomplete bounded video metadata');
+          }
+        } catch (error) {
+          if (original.kind !== 'ranged') {
+            throw error;
+          }
+          this.logger.warn(`Bounded metadata fallback for ${asset.id}: ${error}`);
+          this.telemetryRepository.jobs.addToCounter('immich.metadata.ranged.fallbacks', 1);
+          await original.cleanup();
+          original = { kind: 'full', ...(await this.ensureLocalFile(asset.originalPath)) };
+          extracted = await readMetadata();
+        }
+        const [exifResult, stats] = extracted;
         const { tags: exifTags, audio, video, packets, format } = exifResult;
         this.logger.verbose('Exif Tags', exifTags);
 
@@ -433,7 +465,7 @@ export class MetadataService extends BaseService {
         );
 
         if (this.isMotionPhoto(asset, exifTags)) {
-          tasks.push(() => this.applyMotionPhotos(asset, exifTags, dates, stats, localOriginal));
+          tasks.push(() => this.applyMotionPhotos(asset, exifTags, dates, stats, original.localPath));
         }
 
         if (isFaceImportEnabled(metadata) && this.hasTaggedFaces(exifTags)) {
@@ -457,8 +489,31 @@ export class MetadataService extends BaseService {
         await localSidecar?.cleanup();
       }
     } finally {
-      await cleanupOriginal();
+      await original.cleanup();
     }
+  }
+
+  private async getMetadataOriginal(asset: { id: string; type: AssetType; originalPath: string }) {
+    const options = this.configRepository.getEnv().transfer;
+    if (options?.rangedMetadataEnabled && asset.type === AssetType.Video && !isAbsolute(asset.originalPath)) {
+      const staged = await this.originalStages?.acquire(asset.originalPath);
+      if (staged) {
+        return { kind: 'full' as const, ...staged };
+      }
+      const backend = await this.backendFor(asset.originalPath);
+      if (backend instanceof S3StorageBackend) {
+        const result = await prepareRangedMetadata(backend, asset.originalPath, options.rangedMetadataMaxBytes);
+        this.telemetryRepository.jobs.addToCounter('immich.metadata.ranged.attempts', 1);
+        this.telemetryRepository.jobs.addToCounter('immich.metadata.ranged.bytes', result.bytes, { unit: 'By' });
+        if (result.kind === 'complete') {
+          this.logger.debug(`Bounded metadata read for ${asset.id} transferred ${result.bytes} bytes`);
+          return { ...result, kind: 'ranged' as const };
+        }
+        this.logger.debug(`Bounded metadata fallback for ${asset.id} after ${result.bytes} bytes: ${result.reason}`);
+        this.telemetryRepository.jobs.addToCounter('immich.metadata.ranged.fallbacks', 1);
+      }
+    }
+    return { kind: 'full' as const, ...(await this.ensureLocalFile(asset.originalPath)) };
   }
 
   @OnJob({ name: JobName.SidecarQueueAll, queue: QueueName.Sidecar })

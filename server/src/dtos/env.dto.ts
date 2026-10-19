@@ -52,6 +52,13 @@ export const EnvSchema = z
     IMMICH_MEDIA_LOCATION: absolutePath,
     GALLERY_S3_DIRECT_UPLOAD_ENABLED: stringBool.optional(),
     GALLERY_ORIGINAL_STAGE_ENABLED: stringBool.optional(),
+    GALLERY_RANGED_METADATA_ENABLED: stringBool.optional(),
+    GALLERY_RANGED_METADATA_MAX_BYTES: z.coerce
+      .number()
+      .int()
+      .min(1024)
+      .max(16 * 1024 ** 2)
+      .optional(),
     GALLERY_ORIGINAL_STAGE_MAX_BYTES: z.coerce.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
     GALLERY_ORIGINAL_STAGE_MAX_AGE_SECONDS: z.coerce.number().int().min(60).max(604_800).optional(),
     GALLERY_ORIGINAL_STAGE_DIRECTORY: absolutePath,
