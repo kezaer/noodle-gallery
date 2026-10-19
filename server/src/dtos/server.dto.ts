@@ -132,6 +132,7 @@ const ServerConfigSchema = z
 
 const ServerFeaturesSchema = z
   .object({
+    directUpload: z.boolean().describe('Whether owner direct S3 multipart uploads are enabled'),
     smartSearch: z.boolean().describe('Whether smart search is enabled'),
     smartSearchHasCutoff: z
       .boolean()

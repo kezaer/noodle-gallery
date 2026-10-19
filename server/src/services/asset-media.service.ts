@@ -144,6 +144,7 @@ export class AssetMediaService extends BaseService {
     sidecarFile?: UploadFile,
   ): Promise<AssetMediaResponseDto> {
     let asset: Asset | undefined;
+    let reservationId: string | undefined;
     try {
       await this.requireAccess({
         auth,
@@ -152,7 +153,11 @@ export class AssetMediaService extends BaseService {
         ids: [auth.user.id],
       });
 
-      this.requireQuota(auth, file.size);
+      if (this.configRepository.getEnv().transfer?.directUploadEnabled && this.transfers) {
+        reservationId = await this.transfers.reserveLegacy(auth.user.id, file.size);
+      } else {
+        this.requireQuota(auth, file.size);
+      }
 
       if (dto.livePhotoVideoId) {
         await onBeforeLink(
@@ -160,7 +165,7 @@ export class AssetMediaService extends BaseService {
           { userId: auth.user.id, livePhotoVideoId: dto.livePhotoVideoId },
         );
       }
-      asset = await this.create(auth.user.id, dto, file, sidecarFile);
+      asset = await this.create(auth.user.id, dto, file, sidecarFile, reservationId);
 
       if (auth.sharedLink) {
         await this.addToSharedLink(auth.sharedLink, asset.id);
@@ -169,6 +174,10 @@ export class AssetMediaService extends BaseService {
       return { id: asset.id, status: AssetMediaStatus.CREATED };
     } catch (error: any) {
       return this.handleUploadError(error, auth, file, sidecarFile, asset);
+    } finally {
+      if (reservationId) {
+        await this.transfers?.releaseReservation(reservationId);
+      }
     }
   }
 
@@ -356,7 +365,13 @@ export class AssetMediaService extends BaseService {
     throw error;
   }
 
-  private async create(ownerId: string, dto: AssetMediaCreateDto, file: UploadFile, sidecarFile?: UploadFile) {
+  private async create(
+    ownerId: string,
+    dto: AssetMediaCreateDto,
+    file: UploadFile,
+    sidecarFile?: UploadFile,
+    reservationId?: string,
+  ) {
     const asset = await this.assetRepository.create({
       ownerId,
       libraryId: null,
@@ -378,6 +393,7 @@ export class AssetMediaService extends BaseService {
 
     const backendFiles: string[] = [];
     let writeBackend: StorageBackend | undefined;
+    let quotaAccounted = false;
 
     try {
       // #763 (E19): the uploader is always the owner, so this is the uploader's own overlay
@@ -424,6 +440,9 @@ export class AssetMediaService extends BaseService {
         });
         backendFiles.push(relativeKey);
         await this.assetRepository.update({ id: asset.id, originalPath: relativeKey });
+        if (this.configRepository.getEnv().transfer?.stageEnabled && this.originalStages) {
+          await this.originalStages.adoptLegacy(asset.id, relativeKey, file.size, file.originalPath);
+        }
         // Clean up the temp local file
         await this.jobRepository.queue({ name: JobName.FileDelete, data: { files: [file.originalPath] } });
 
@@ -443,11 +462,19 @@ export class AssetMediaService extends BaseService {
         }
       }
 
-      await this.eventRepository.emit('AssetCreate', { asset, file });
+      if (reservationId && this.transfers) {
+        await this.transfers.accountLegacy(reservationId, ownerId, file.size);
+        quotaAccounted = true;
+      }
+      await this.eventRepository.emit('AssetCreate', { asset, file, ...(quotaAccounted && { quotaAccounted }) });
 
       await this.jobRepository.queue({ name: JobName.AssetExtractMetadata, data: { id: asset.id, source: 'upload' } });
     } catch (error: Error | any) {
       try {
+        if (quotaAccounted) {
+          await this.userRepository.updateUsage(ownerId, -file.size);
+        }
+        await this.originalStages?.discard(asset.id);
         await this.assetRepository.remove({ id: asset.id });
         for (const file of backendFiles) {
           try {

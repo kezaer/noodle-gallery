@@ -254,8 +254,8 @@ export class UserService extends BaseService {
   }
 
   @OnEvent({ name: 'AssetCreate' })
-  async onAssetCreate({ asset, file }: ArgOf<'AssetCreate'>) {
-    if (file) {
+  async onAssetCreate({ asset, file, quotaAccounted }: ArgOf<'AssetCreate'>) {
+    if (file && !quotaAccounted) {
       await this.userRepository.updateUsage(asset.ownerId, file.size);
     }
   }

@@ -1593,6 +1593,47 @@ export type AssetMetadataBulkResponseDto = {
         [key: string]: any;
     };
 };
+export type UploadSessionCreateDto = {
+    checksum: string;
+    duration?: number;
+    fileCreatedAt: string;
+    fileModifiedAt: string;
+    filename: string;
+    isFavorite?: boolean;
+    metadata?: AssetMetadataUpsertItemDto[];
+    size: number;
+    visibility?: AssetVisibility;
+};
+export type UploadSessionPartDto = {
+    etag: string;
+    partNumber: number;
+    size: number;
+};
+export type UploadSessionResponseDto = {
+    checksum: string;
+    error?: string;
+    expiresAt: string;
+    filename: string;
+    id: string;
+    partSize: number;
+    parts: UploadSessionPartDto[];
+    result?: {
+        id: string;
+        status: Status2;
+    };
+    size: number;
+    state: State;
+};
+export type UploadSessionSignPartsDto = {
+    partNumbers: number[];
+};
+export type UploadSessionSignedPartsDto = {
+    parts: {
+        expiresAt: string;
+        partNumber: number;
+        url: string;
+    }[];
+};
 export type ExifResponseDto = {
     /** City name */
     city?: string | null;
@@ -3535,6 +3576,8 @@ export type ServerConfigDto = {
 export type ServerFeaturesDto = {
     /** Whether config file is available */
     configFile: boolean;
+    /** Whether owner direct S3 multipart uploads are enabled */
+    directUpload: boolean;
     /** Whether duplicate detection is enabled */
     duplicateDetection: boolean;
     /** Whether email notifications are enabled */
@@ -6505,6 +6548,75 @@ export function getAssetStatistics({ isFavorite, isTrashed, visibility }: {
     }))}`, {
         ...opts
     }));
+}
+/**
+ * Create a direct upload session
+ */
+export function createUploadSession({ uploadSessionCreateDto }: {
+    uploadSessionCreateDto: UploadSessionCreateDto;
+}, opts?: Oazapfts.RequestOpts) {
+    return oazapfts.ok(oazapfts.fetchJson<{
+        status: 201;
+        data: UploadSessionResponseDto;
+    }>("/assets/upload-sessions", oazapfts.json({
+        ...opts,
+        method: "POST",
+        body: uploadSessionCreateDto
+    })));
+}
+/**
+ * Abort an uncommitted direct upload session
+ */
+export function abortUploadSession({ id }: {
+    id: string;
+}, opts?: Oazapfts.RequestOpts) {
+    return oazapfts.ok(oazapfts.fetchText(`/assets/upload-sessions/${encodeURIComponent(id)}`, {
+        ...opts,
+        method: "DELETE"
+    }));
+}
+/**
+ * Get a direct upload session and its uploaded parts
+ */
+export function getUploadSession({ id }: {
+    id: string;
+}, opts?: Oazapfts.RequestOpts) {
+    return oazapfts.ok(oazapfts.fetchJson<{
+        status: 200;
+        data: UploadSessionResponseDto;
+    }>(`/assets/upload-sessions/${encodeURIComponent(id)}`, {
+        ...opts
+    }));
+}
+/**
+ * Request asynchronous direct upload completion
+ */
+export function completeUploadSession({ id }: {
+    id: string;
+}, opts?: Oazapfts.RequestOpts) {
+    return oazapfts.ok(oazapfts.fetchJson<{
+        status: 202;
+        data: UploadSessionResponseDto;
+    }>(`/assets/upload-sessions/${encodeURIComponent(id)}/complete`, {
+        ...opts,
+        method: "POST"
+    }));
+}
+/**
+ * Sign a batch of direct upload parts
+ */
+export function signUploadSessionParts({ id, uploadSessionSignPartsDto }: {
+    id: string;
+    uploadSessionSignPartsDto: UploadSessionSignPartsDto;
+}, opts?: Oazapfts.RequestOpts) {
+    return oazapfts.ok(oazapfts.fetchJson<{
+        status: 200;
+        data: UploadSessionSignedPartsDto;
+    }>(`/assets/upload-sessions/${encodeURIComponent(id)}/parts`, oazapfts.json({
+        ...opts,
+        method: "POST",
+        body: uploadSessionSignPartsDto
+    })));
 }
 /**
  * Retrieve an asset
@@ -11568,6 +11680,22 @@ export enum AssetJobName {
     RefreshMetadata = "refresh-metadata",
     RegenerateThumbnail = "regenerate-thumbnail",
     TranscodeVideo = "transcode-video"
+}
+export enum Status2 {
+    Created = "created",
+    Duplicate = "duplicate"
+}
+export enum State {
+    Initiating = "initiating",
+    Uploading = "uploading",
+    Finalizing = "finalizing",
+    Verifying = "verifying",
+    Verified = "verified",
+    Committed = "committed",
+    Duplicate = "duplicate",
+    Rejected = "rejected",
+    Aborted = "aborted",
+    Expired = "expired"
 }
 export enum PersonUserRole {
     Read = "read",

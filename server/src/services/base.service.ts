@@ -1,4 +1,4 @@
-import { BadRequestException, HttpException, HttpStatus, Injectable } from '@nestjs/common';
+import { BadRequestException, HttpException, HttpStatus, Injectable, Optional } from '@nestjs/common';
 import { Insertable } from 'kysely';
 import { createReadStream } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -74,6 +74,7 @@ import { SystemMetadataRepository } from 'src/repositories/system-metadata.repos
 import { TagRepository } from 'src/repositories/tag.repository.js';
 import { TelemetryRepository } from 'src/repositories/telemetry.repository.js';
 import { TrashRepository } from 'src/repositories/trash.repository.js';
+import { UploadTransferRepository } from 'src/repositories/upload-transfer.repository.js';
 import { UserGroupRepository } from 'src/repositories/user-group.repository.js';
 import { UserRepository } from 'src/repositories/user.repository.js';
 import { VersionHistoryRepository } from 'src/repositories/version-history.repository.js';
@@ -84,6 +85,7 @@ import { WorkflowRepository } from 'src/repositories/workflow.repository.js';
 import { UserTable } from 'src/schema/tables/user.table.js';
 import { FaceAssignmentService } from 'src/services/face-assignment.service.js';
 import { IdentityMergePropagationService } from 'src/services/identity-merge-propagation.service.js';
+import { OriginalStageService } from 'src/services/original-stage.service.js';
 import {
   AccessPersonRequest,
   AccessRequest,
@@ -253,6 +255,8 @@ export class BaseService {
     protected viewRepository: ViewRepository,
     protected websocketRepository: WebsocketRepository,
     protected workflowRepository: WorkflowRepository,
+    @Optional() protected transfers?: UploadTransferRepository,
+    @Optional() protected originalStages?: OriginalStageService,
   ) {
     this.logger.setContext(this.constructor.name);
     this.storageCore = StorageCore.create(
@@ -489,6 +493,10 @@ export class BaseService {
    *          in a `finally` block.
    */
   protected async ensureLocalFile(filePath: string): Promise<{ localPath: string; cleanup: () => Promise<void> }> {
+    const staged = await this.originalStages?.acquire(filePath);
+    if (staged) {
+      return staged;
+    }
     const backend = await this.backendFor(filePath);
     const { tempPath, cleanup } = await backend.downloadToTemp(filePath);
     return { localPath: tempPath, cleanup };

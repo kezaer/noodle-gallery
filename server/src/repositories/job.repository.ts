@@ -1,5 +1,5 @@
 import { getQueueToken } from '@nestjs/bullmq';
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { ModuleRef, Reflector } from '@nestjs/core';
 import { JobsOptions, Queue, Worker, WorkerOptions } from 'bullmq';
 import { setTimeout } from 'node:timers/promises';
@@ -8,9 +8,11 @@ import type { JobCounts, JobItem, JobOf, JobTypeCounts } from 'src/types.js';
 import { JobConfig } from 'src/decorators.js';
 import { QueueJobResponseDto, QueueJobSearchDto } from 'src/dtos/queue.dto.js';
 import { ImmichWorker, JobName, JobStatus, MetadataKey, QueueCleanType, QueueJobStatus, QueueName } from 'src/enum.js';
+import { uploadJobContext } from 'src/gallery/transfer.js';
 import { ConfigRepository } from 'src/repositories/config.repository.js';
 import { EventRepository } from 'src/repositories/event.repository.js';
 import { LoggingRepository } from 'src/repositories/logging.repository.js';
+import { UploadTransferRepository } from 'src/repositories/upload-transfer.repository.js';
 import { ImmichStartupError, getKeyByValue, getMethodNames } from 'src/utils/misc.js';
 
 type JobMapItem = {
@@ -81,6 +83,7 @@ export class JobRepository {
     private configRepository: ConfigRepository,
     private eventRepository: EventRepository,
     private logger: LoggingRepository,
+    @Optional() private transfers?: UploadTransferRepository,
   ) {
     this.logger.setContext(JobRepository.name);
   }
@@ -460,6 +463,9 @@ export class JobRepository {
       return;
     }
 
+    const tracked = this.transfers
+      ? await this.transfers.registerJobs(items, uploadJobContext.getStore()?.assetId)
+      : new Map<string, string>();
     const promises = [];
     const itemsByQueue = {} as Record<string, (JobItem & { data: any; options: JobsOptions | undefined })[]>;
     for (const item of items) {
@@ -469,6 +475,14 @@ export class JobRepository {
         data: item.data || {},
         options: this.getJobOptions(item) || undefined,
       } as JobItem & { data: any; options: JobsOptions | undefined };
+
+      const uploadToken = tracked.get(JSON.stringify(item));
+      if (uploadToken) {
+        promises.push(
+          this.queueStable(item, uploadToken).then(() => this.transfers?.finishJob(uploadToken, 'accepted')),
+        );
+        continue;
+      }
 
       if (job.options?.jobId || job.options?.deduplication) {
         // need to use add() instead of addBulk() for jobId/deduplication to take effect
@@ -497,6 +511,28 @@ export class JobRepository {
     }
 
     await Promise.all(promises);
+  }
+
+  async queueStable(item: JobItem, jobId: string): Promise<void> {
+    const queue = this.getQueue(this.getQueueName(item.name));
+    await queue.add(item.name, item.data ?? {}, {
+      ...this.getJobOptions(item),
+      jobId,
+      attempts: 3,
+      backoff: { type: 'exponential', delay: 1000 },
+      removeOnComplete: false,
+      removeOnFail: false,
+    });
+  }
+
+  async reconcileUploadJobs() {
+    if (!this.transfers) {
+      return;
+    }
+    for (const row of await this.transfers.pendingJobs()) {
+      await this.queueStable(row.item, row.token);
+      await this.transfers.finishJob(row.token, 'accepted');
+    }
   }
 
   async queue(item: JobItem): Promise<void> {

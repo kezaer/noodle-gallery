@@ -641,7 +641,7 @@ export class MediaService extends BaseService {
     const { x1, y1, x2, y2, oldWidth, oldHeight, exifOrientation, previewPath, originalPath } = data;
 
     // For S3 assets, download to local temp files for processing
-    const originalLocal = await this.ensureLocalFile(originalPath);
+    const originalLocal = data.type === AssetType.Video ? undefined : await this.ensureLocalFile(originalPath);
     const previewLocal = previewPath ? await this.ensureLocalFile(previewPath) : undefined;
 
     try {
@@ -653,10 +653,10 @@ export class MediaService extends BaseService {
         }
         inputImage = previewLocal.localPath;
       } else if (image.extractEmbedded && mimeTypes.isRaw(originalPath)) {
-        const extracted = await this.extractImage(originalLocal.localPath, image.preview.size);
-        inputImage = extracted ? extracted.buffer : originalLocal.localPath;
+        const extracted = await this.extractImage(originalLocal!.localPath, image.preview.size);
+        inputImage = extracted ? extracted.buffer : originalLocal!.localPath;
       } else {
-        inputImage = originalLocal.localPath;
+        inputImage = originalLocal!.localPath;
       }
 
       const decoded = await this.mediaRepository.decodeImage(inputImage, {
@@ -700,7 +700,7 @@ export class MediaService extends BaseService {
 
       return JobStatus.Success;
     } finally {
-      await originalLocal.cleanup();
+      await originalLocal?.cleanup();
       await previewLocal?.cleanup();
     }
   }

@@ -13,6 +13,7 @@ import {
   QueueName,
   SystemMetadataKey,
 } from 'src/enum.js';
+import { uploadJobContext } from 'src/gallery/transfer.js';
 import { ArgsOf } from 'src/repositories/event.repository.js';
 import { BaseService } from 'src/services/base.service.js';
 import { hexOrBufferToBase64 } from 'src/utils/bytes.js';
@@ -130,17 +131,39 @@ export class JobService extends BaseService {
 
   @OnEvent({ name: 'JobRun' })
   async onJobRun(...[queueName, job]: ArgsOf<'JobRun'>) {
-    try {
-      await this.eventRepository.emit('JobStart', queueName, job);
-      const response = await this.jobRepository.run(job);
-      await this.eventRepository.emit('JobSuccess', { job, response });
-      if (response && typeof response === 'string' && [JobStatus.Success, JobStatus.Skipped].includes(response)) {
-        await this.onDone(job);
+    const token =
+      'id' in job && typeof job.id === 'string' && job.id.startsWith('gallery-upload-') ? job.id : undefined;
+    const tracked = token && this.transfers ? await this.transfers.startJob(token) : undefined;
+    const run = async () => {
+      let outcome: 'success' | 'skipped' | 'failed' | 'accepted' = 'accepted';
+      try {
+        await this.eventRepository.emit('JobStart', queueName, job);
+        const response = await this.jobRepository.run(job);
+        if (tracked && response === JobStatus.Failed) {
+          throw new Error(`Upload processing job ${job.name} returned Failed`);
+        }
+        await this.eventRepository.emit('JobSuccess', { job, response });
+        if (response && typeof response === 'string' && [JobStatus.Success, JobStatus.Skipped].includes(response)) {
+          await this.onDone(job);
+          outcome = response === JobStatus.Success ? 'success' : 'skipped';
+        }
+      } catch (error) {
+        await this.eventRepository.emit('JobError', { job, error });
+        if (tracked) {
+          outcome = tracked.attempts >= 3 ? 'failed' : 'accepted';
+          throw error;
+        }
+      } finally {
+        await this.eventRepository.emit('JobComplete', queueName, job);
+        if (tracked && this.transfers) {
+          await this.transfers.finishJob(tracked.token, outcome);
+        }
       }
-    } catch (error: Error | any) {
-      await this.eventRepository.emit('JobError', { job, error });
-    } finally {
-      await this.eventRepository.emit('JobComplete', queueName, job);
+    };
+    if (tracked) {
+      await uploadJobContext.run({ assetId: tracked.assetId, token: tracked.token }, run);
+    } else {
+      await run();
     }
   }
 

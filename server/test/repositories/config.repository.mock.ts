@@ -85,6 +85,14 @@ export const envData: EnvData = {
     allow: true,
   },
 
+  transfer: {
+    directUploadEnabled: false,
+    stageEnabled: false,
+    stageMaxBytes: 10 * 1024 ** 3,
+    stageMaxAgeSeconds: 86_400,
+    sessionMaxAgeSeconds: 86_400,
+    partUrlTtlSeconds: 900,
+  },
   storage: {
     backend: 'disk',
     ignoreMountCheckErrors: false,

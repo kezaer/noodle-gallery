@@ -69,3 +69,5 @@
 1794100000000-DropAssetIsFavoriteColumn
 1796000000000-AddAssetFaceCreatedBy
 1797000000000-AddAssetLocalDateTimeIndex
+
+1798000000000-AddUploadTransfers

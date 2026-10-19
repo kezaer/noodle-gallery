@@ -315,7 +315,29 @@ export class WorkflowExecutionService extends BaseService {
   }
 
   @OnEvent({ name: 'AssetCreate' })
-  onAssetCreate({ asset: { ownerId: userId, id: assetId } }: ArgOf<'AssetCreate'>) {
+  async onAssetCreate({ asset: { ownerId: userId, id: assetId }, directUpload }: ArgOf<'AssetCreate'>) {
+    if (directUpload && this.transfers) {
+      const pending = await this.transfers.snapshotWorkflows(assetId, userId);
+      for (const { workflowId } of pending) {
+        await this.jobRepository.queueStable(
+          {
+            name: JobName.WorkflowAssetTrigger,
+            data: {
+              workflowId,
+              assetId,
+            },
+          },
+          `gallery-upload-workflow-${assetId}-${workflowId}`,
+        );
+        await this.transfers.db
+          .updateTable('gallery_upload_workflow')
+          .set({ accepted: true })
+          .where('assetId', '=', assetId)
+          .where('workflowId', '=', workflowId)
+          .execute();
+      }
+      return;
+    }
     return this.onAssetTrigger({ userId, assetId, trigger: WorkflowTrigger.AssetCreate });
   }
 

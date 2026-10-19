@@ -48,7 +48,9 @@ type EventMap = {
   ClusterGroupRequest: [{ clusterGroupId: string; userId: string; senderName: string }];
 
   // asset events
-  AssetCreate: [{ asset: Pick<Asset, 'id' | 'ownerId'>; file?: UploadFile }];
+  AssetCreate: [
+    { asset: Pick<Asset, 'id' | 'ownerId'>; file?: UploadFile; directUpload?: boolean; quotaAccounted?: boolean },
+  ];
   AssetTag: [{ assetId: string; userId: string }];
   AssetUntag: [{ assetId: string }];
   AssetHide: [{ assetId: string; userId: string }];

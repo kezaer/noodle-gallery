@@ -114,6 +114,16 @@ export interface EnvData {
     metrics: Set<ImmichTelemetry>;
   };
 
+  transfer: {
+    directUploadEnabled: boolean;
+    stageEnabled: boolean;
+    stageMaxBytes: number;
+    stageMaxAgeSeconds: number;
+    stageDirectory?: string;
+    sessionMaxAgeSeconds: number;
+    partUrlTtlSeconds: number;
+  };
+
   storage: {
     backend: 'disk' | 's3';
     ignoreMountCheckErrors: boolean;
@@ -365,6 +375,16 @@ const getEnv = (): EnvData => {
 
     setup: {
       allow: dto.IMMICH_ALLOW_SETUP ?? true,
+    },
+
+    transfer: {
+      directUploadEnabled: dto.GALLERY_S3_DIRECT_UPLOAD_ENABLED ?? false,
+      stageEnabled: dto.GALLERY_ORIGINAL_STAGE_ENABLED ?? false,
+      stageMaxBytes: dto.GALLERY_ORIGINAL_STAGE_MAX_BYTES ?? 10 * 1024 ** 3,
+      stageMaxAgeSeconds: dto.GALLERY_ORIGINAL_STAGE_MAX_AGE_SECONDS ?? 86_400,
+      stageDirectory: dto.GALLERY_ORIGINAL_STAGE_DIRECTORY,
+      sessionMaxAgeSeconds: dto.GALLERY_UPLOAD_SESSION_MAX_AGE_SECONDS ?? 86_400,
+      partUrlTtlSeconds: dto.GALLERY_UPLOAD_PART_URL_TTL_SECONDS ?? 900,
     },
 
     storage: {

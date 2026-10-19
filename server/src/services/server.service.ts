@@ -122,9 +122,10 @@ export class ServerService extends BaseService {
     // slower CPUs. Cache invalidates on ConfigUpdate.
     const { reverseGeocoding, metadata, map, machineLearning, trash, oauth, passwordLogin, notifications, ffmpeg } =
       await this.getConfig({ withCache: true });
-    const { configFile, peopleStatistics } = this.configRepository.getEnv();
+    const { configFile, peopleStatistics, transfer, storage } = this.configRepository.getEnv();
 
     return {
+      directUpload: !!transfer?.directUploadEnabled && storage.backend === 's3',
       smartSearch: isSmartSearchEnabled(machineLearning),
       smartSearchHasCutoff:
         isSmartSearchEnabled(machineLearning) && isActiveDistanceThreshold(machineLearning.clip.maxDistance),
