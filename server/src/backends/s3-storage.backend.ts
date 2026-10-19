@@ -1,4 +1,7 @@
 import {
+  AbortMultipartUploadCommand,
+  CompleteMultipartUploadCommand,
+  CreateMultipartUploadCommand,
   DeleteObjectCommand,
   DeleteObjectsCommand,
   GetObjectCommand,
@@ -6,18 +9,22 @@ import {
   GetObjectCommandOutput,
   HeadObjectCommand,
   ListObjectsV2Command,
+  ListPartsCommand,
   S3Client,
+  UploadPartCommand,
 } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { randomUUID } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
-import { unlink } from 'node:fs/promises';
+import { rm, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable, Transform, addAbortSignal, pipeline as pipelineCallback } from 'node:stream';
 import { buffer } from 'node:stream/consumers';
 import { pipeline } from 'node:stream/promises';
+import z from 'zod';
+import { S3MultipartStore, SignedPart, StoredPart } from 'src/interfaces/s3-multipart.interface.js';
 import {
   RangeNotSatisfiableError,
   ServeOptions,
@@ -25,6 +32,23 @@ import {
   StorageBackend,
 } from 'src/interfaces/storage-backend.interface.js';
 import { getContentDispositionHeader } from 'src/utils/file.js';
+
+const partNumberSchema = z.number().int().min(1).max(10_000);
+const byteCountSchema = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
+const storedPartSchema = z.object({
+  PartNumber: partNumberSchema,
+  ETag: z.string().min(1),
+  Size: byteCountSchema,
+});
+const listPartsSchema = z.object({
+  Parts: z.array(storedPartSchema).default([]),
+  IsTruncated: z.boolean(),
+  NextPartNumberMarker: z.string().optional(),
+});
+const s3ErrorSchema = z.object({
+  name: z.string().optional(),
+  $metadata: z.object({ httpStatusCode: z.number().optional() }).optional(),
+});
 
 // getReadableUrl backs server-side, download-free probing (ffprobe) that completes within the
 // request. Its URL is a bearer credential, so it gets a much shorter expiry than the client-facing
@@ -81,7 +105,7 @@ export interface S3StorageConfig {
   proxyReadConcurrency?: number;
 }
 
-export class S3StorageBackend implements StorageBackend {
+export class S3StorageBackend implements StorageBackend, S3MultipartStore {
   private client: S3Client;
   private bucket: string;
   private presignedUrlExpiry: number;
@@ -97,6 +121,7 @@ export class S3StorageBackend implements StorageBackend {
     this.client = new S3Client({
       region: config.region,
       endpoint: config.endpoint,
+      requestChecksumCalculation: 'WHEN_REQUIRED',
       forcePathStyle: !!config.endpoint, // needed for MinIO and other S3-compatible services
       credentials:
         config.accessKeyId && config.secretAccessKey
@@ -122,6 +147,143 @@ export class S3StorageBackend implements StorageBackend {
     await upload.done();
   }
 
+  async startMultipart(key: string, contentType: string): Promise<string> {
+    const response = await this.client.send(
+      new CreateMultipartUploadCommand({ Bucket: this.bucket, Key: key, ContentType: contentType }),
+    );
+    return z.object({ UploadId: z.string().min(1) }).parse(response).UploadId;
+  }
+
+  async listMultipartParts(key: string, uploadId: string): Promise<StoredPart[]> {
+    const parts: StoredPart[] = [];
+    let marker = 0;
+    while (true) {
+      const response = await this.client.send(
+        new ListPartsCommand({
+          Bucket: this.bucket,
+          Key: key,
+          UploadId: uploadId,
+          PartNumberMarker: marker === 0 ? undefined : String(marker),
+          MaxParts: 1000,
+        }),
+      );
+      const page = listPartsSchema.parse(response);
+      let previous = marker;
+      for (const part of page.Parts) {
+        if (part.PartNumber <= previous) {
+          throw new Error('S3 returned unordered multipart parts');
+        }
+        parts.push({ partNumber: part.PartNumber, etag: part.ETag, size: part.Size });
+        previous = part.PartNumber;
+      }
+      if (!page.IsTruncated) {
+        return parts;
+      }
+      const nextMarker = partNumberSchema.parse(Number(page.NextPartNumberMarker));
+      if (nextMarker <= marker || nextMarker !== previous) {
+        throw new Error('S3 returned an invalid multipart continuation marker');
+      }
+      marker = nextMarker;
+    }
+  }
+
+  async signMultipartParts(key: string, uploadId: string, numbers: number[], expiresIn: number): Promise<SignedPart[]> {
+    const partNumbers = z.array(partNumberSchema).parse(numbers);
+    z.number().int().min(1).max(604_800).parse(expiresIn);
+    const signingDate = new Date(Math.floor(Date.now() / 1000) * 1000);
+    const expiresAt = new Date(signingDate.getTime() + expiresIn * 1000).toISOString();
+    return Promise.all(
+      partNumbers.map(async (partNumber) => ({
+        partNumber,
+        url: await getSignedUrl(
+          this.client,
+          new UploadPartCommand({ Bucket: this.bucket, Key: key, UploadId: uploadId, PartNumber: partNumber }),
+          { expiresIn, signingDate },
+        ),
+        expiresAt,
+      })),
+    );
+  }
+
+  async completeMultipart(key: string, uploadId: string, parts: StoredPart[]): Promise<void> {
+    const response = await this.client.send(
+      new CompleteMultipartUploadCommand({
+        Bucket: this.bucket,
+        Key: key,
+        UploadId: uploadId,
+        MultipartUpload: { Parts: parts.map(({ partNumber, etag }) => ({ PartNumber: partNumber, ETag: etag })) },
+      }),
+    );
+    z.object({ ETag: z.string().min(1) }).parse(response);
+  }
+
+  async abortMultipart(key: string, uploadId: string): Promise<void> {
+    try {
+      await this.client.send(new AbortMultipartUploadCommand({ Bucket: this.bucket, Key: key, UploadId: uploadId }));
+    } catch (error) {
+      const parsed = s3ErrorSchema.safeParse(error);
+      if (parsed.success && parsed.data.name === 'NoSuchUpload') {
+        return;
+      }
+      throw error;
+    }
+  }
+
+  async headObject(key: string): Promise<{ bytes: number } | undefined> {
+    try {
+      const response = await this.client.send(new HeadObjectCommand({ Bucket: this.bucket, Key: key }));
+      return { bytes: z.object({ ContentLength: byteCountSchema }).parse(response).ContentLength };
+    } catch (error) {
+      const parsed = s3ErrorSchema.safeParse(error);
+      if (parsed.success && (parsed.data.name === 'NotFound' || parsed.data.$metadata?.httpStatusCode === 404)) {
+        return;
+      }
+      throw error;
+    }
+  }
+
+  async readRange(key: string, start: number, length: number): Promise<Readable> {
+    byteCountSchema.parse(start);
+    byteCountSchema.min(1).parse(length);
+    const end = byteCountSchema.parse(start + length - 1);
+    const { stream, length: returnedLength, contentRange } = await this.getObject(key, `bytes=${start}-${end}`);
+    const match = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(contentRange ?? '');
+    const returnedStart = Number(match?.[1]);
+    const returnedEnd = Number(match?.[2]);
+    const total = Number(match?.[3]);
+    if (
+      !match ||
+      returnedStart !== start ||
+      !Number.isSafeInteger(returnedEnd) ||
+      !Number.isSafeInteger(total) ||
+      returnedEnd < start ||
+      returnedEnd > end ||
+      returnedEnd >= total ||
+      returnedLength !== returnedEnd - start + 1
+    ) {
+      stream.destroy();
+      throw new Error('S3 returned an invalid range response');
+    }
+    const ranged = Readable.from(
+      (async function* () {
+        let bytes = 0;
+        for await (const chunk of stream) {
+          const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          bytes += data.length;
+          if (bytes > returnedLength) {
+            throw new Error('S3 range response exceeded its declared length');
+          }
+          yield data;
+        }
+        if (bytes !== returnedLength) {
+          throw new Error('S3 range response ended before its declared length');
+        }
+      })(),
+    );
+    ranged.once('close', () => stream.destroy());
+    return ranged;
+  }
+
   /**
    * `range` is the client's raw `Range` header, handed to S3 untouched — S3
    * understands `bytes=a-b`, `bytes=a-`, and `bytes=-n`, and answers with
@@ -144,8 +306,11 @@ export class S3StorageBackend implements StorageBackend {
       throw error;
     }
 
+    if (!(response.Body instanceof Readable)) {
+      throw new TypeError('S3 returned an invalid object body');
+    }
     return {
-      stream: response.Body as Readable,
+      stream: response.Body,
       contentType: response.ContentType,
       length: response.ContentLength,
       contentRange: response.ContentRange,
@@ -315,7 +480,12 @@ export class S3StorageBackend implements StorageBackend {
     const tempPath = join(tmpdir(), `immich-${randomUUID()}.tmp`);
     const { stream } = await this.get(key);
     const writeStream = createWriteStream(tempPath);
-    await pipeline(stream, writeStream);
+    try {
+      await pipeline(stream, writeStream);
+    } catch (error) {
+      await rm(tempPath, { force: true });
+      throw error;
+    }
 
     return {
       tempPath,

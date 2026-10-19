@@ -1,6 +1,7 @@
 import { CreateBucketCommand, ListObjectsV2Command, S3Client } from '@aws-sdk/client-s3';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
+import { buffer } from 'node:stream/consumers';
 import { GenericContainer, type StartedTestContainer, Wait } from 'testcontainers';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { S3StorageBackend } from 'src/backends/s3-storage.backend.js';
@@ -84,6 +85,89 @@ describe.skipIf(!canRunDocker)('S3StorageBackend integration (MinIO)', () => {
     expect(await backend.exists('test/exists.txt')).toBe(true);
     expect(await backend.exists('test/nope.txt')).toBe(false);
   });
+
+  it('resumes nonempty signed browser parts and completes at the fixed key', async () => {
+    const key = 'multipart/resume.bin';
+    const firstBody = Buffer.alloc(5 * 1024 * 1024, 'j');
+    const finalBody = Buffer.from('last multipart bytes');
+    const uploadId = await backend.startMultipart(key, 'application/octet-stream');
+    const [first] = await backend.signMultipartParts(key, uploadId, [1], 300);
+    const firstUrl = new URL(first.url);
+    expect(firstUrl.searchParams.has('x-amz-checksum-crc32')).toBe(false);
+    expect(firstUrl.searchParams.has('x-amz-sdk-checksum-algorithm')).toBe(false);
+    const firstPut = await fetch(first.url, { method: 'PUT', body: firstBody });
+    expect(firstPut.status).toBe(200);
+    const firstEtag = firstPut.headers.get('etag');
+    expect(typeof firstEtag).toBe('string');
+    await firstPut.arrayBuffer();
+
+    const resumed = new S3StorageBackend({
+      bucket,
+      region: 'us-east-1',
+      endpoint: `http://${container.getHost()}:${container.getMappedPort(9000)}`,
+      accessKeyId: 'minioadmin',
+      secretAccessKey: 'minioadmin',
+      presignedUrlExpiry: 3600,
+      serveMode: 'redirect',
+    });
+    await expect(resumed.listMultipartParts(key, uploadId)).resolves.toEqual([
+      { partNumber: 1, etag: firstEtag, size: 5_242_880 },
+    ]);
+    await expect(resumed.headObject(key)).resolves.toBeUndefined();
+
+    const [last] = await resumed.signMultipartParts(key, uploadId, [2], 300);
+    const lastPut = await fetch(last.url, { method: 'PUT', body: finalBody });
+    expect(lastPut.status).toBe(200);
+    const lastEtag = lastPut.headers.get('etag');
+    await lastPut.arrayBuffer();
+    const parts = await resumed.listMultipartParts(key, uploadId);
+    expect(parts).toEqual([
+      { partNumber: 1, etag: firstEtag, size: 5_242_880 },
+      { partNumber: 2, etag: lastEtag, size: 20 },
+    ]);
+
+    await resumed.completeMultipart(key, uploadId, parts);
+    await expect(backend.headObject(key)).resolves.toEqual({ bytes: 5_242_900 });
+    await expect(backend.readAll(key)).resolves.toEqual(Buffer.concat([firstBody, finalBody]));
+    await expect(buffer(await backend.readRange(key, firstBody.length - 3, 9))).resolves.toEqual(
+      Buffer.from('jjjlast m'),
+    );
+    await expect(buffer(await backend.readRange(key, firstBody.length + 15, 100))).resolves.toEqual(
+      Buffer.from('bytes'),
+    );
+    await expect(backend.readRange(key, 5_242_900, 1)).rejects.toBeInstanceOf(RangeNotSatisfiableError);
+    await resumed.abortMultipart(key, uploadId);
+    await expect(backend.headObject(key)).resolves.toEqual({ bytes: 5_242_900 });
+  }, 60_000);
+
+  it('lists more than one thousand real parts and aborts without publishing an object', async () => {
+    const key = 'multipart/paginated.bin';
+    const uploadId = await backend.startMultipart(key, 'application/octet-stream');
+    const numbers = Array.from({ length: 1001 }, (_, index) => index + 1);
+    try {
+      for (let offset = 0; offset < numbers.length; offset += 25) {
+        const signed = await backend.signMultipartParts(key, uploadId, numbers.slice(offset, offset + 25), 300);
+        await Promise.all(
+          signed.map(async ({ url }) => {
+            const response = await fetch(url, { method: 'PUT', body: 'p' });
+            expect(response.status).toBe(200);
+            await response.arrayBuffer();
+          }),
+        );
+      }
+      const parts = await backend.listMultipartParts(key, uploadId);
+      expect(parts.map(({ partNumber, size }) => ({ partNumber, size }))).toEqual(
+        numbers.map((partNumber) => ({ partNumber, size: 1 })),
+      );
+      expect(parts.every(({ etag }) => etag.length > 0)).toBe(true);
+      await expect(backend.headObject(key)).resolves.toBeUndefined();
+    } finally {
+      await backend.abortMultipart(key, uploadId);
+    }
+    await backend.abortMultipart(key, uploadId);
+    await expect(backend.listMultipartParts(key, uploadId)).rejects.toMatchObject({ name: 'NoSuchUpload' });
+    await expect(backend.headObject(key)).resolves.toBeUndefined();
+  }, 120_000);
 
   it('should delete objects', async () => {
     await backend.put('test/delete-me.txt', Buffer.from('data'));
