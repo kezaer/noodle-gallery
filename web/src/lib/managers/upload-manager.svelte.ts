@@ -2,6 +2,7 @@ import { getSupportedMediaTypes, type ServerMediaTypesResponseDto } from '@immic
 import { eventManager } from '$lib/managers/event-manager.svelte';
 import { uploadAssetsStore } from '$lib/stores/upload';
 import { cancelUploadRequests } from '$lib/utils';
+import { directUploads } from '$lib/utils/direct-upload';
 
 class UploadManager {
   mediaTypes = $state<ServerMediaTypesResponseDto>({ image: [], sidecar: [], video: [] });
@@ -9,11 +10,14 @@ class UploadManager {
   constructor() {
     eventManager.on({
       AppInit: () => this.#loadExtensions(),
+      AuthUserLoaded: () =>
+        import('$lib/utils/file-uploader').then(({ restoreDirectUploads }) => restoreDirectUploads()),
       AuthLogout: () => this.reset(),
     });
   }
 
   reset() {
+    directUploads.stopAll();
     cancelUploadRequests();
     uploadAssetsStore.reset();
   }

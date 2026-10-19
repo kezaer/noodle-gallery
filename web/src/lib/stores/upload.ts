@@ -16,9 +16,19 @@ function createUploadStore() {
   const isDismissible = derived(uploadAssets, (items) =>
     items.some((item) => item.state === UploadState.ERROR || item.state === UploadState.DUPLICATED),
   );
+  const activeUploads = derived(
+    uploadAssets,
+    (values) =>
+      values.filter((item) => item.state === UploadState.PENDING || item.state === UploadState.STARTED).length,
+  );
+
   const remainingUploads = derived(
     uploadAssets,
-    (values) => values.filter((a) => a.state === UploadState.PENDING || a.state === UploadState.STARTED).length,
+    (values) =>
+      values.filter(
+        ({ state }) =>
+          state !== undefined && [UploadState.PENDING, UploadState.STARTED, UploadState.PAUSED].includes(state),
+      ).length,
   );
 
   const addItem = (newAsset: UploadAsset) => {
@@ -95,6 +105,7 @@ function createUploadStore() {
               break;
             }
 
+            case UploadState.PAUSED:
             case UploadState.DONE: {
               break;
             }
@@ -151,6 +162,7 @@ function createUploadStore() {
   return {
     stats,
     remainingUploads,
+    activeUploads,
     isDismissible,
     isUploading,
     track,

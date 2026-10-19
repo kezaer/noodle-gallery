@@ -16,11 +16,13 @@ export enum UploadState {
   DONE,
   ERROR,
   DUPLICATED,
+  PAUSED,
 }
 
 export type UploadAsset = {
   id: string;
-  file: File;
+  file: File | Pick<File, 'name' | 'size' | 'lastModified'>;
+  directSessionId?: string;
   assetId?: string;
   isTrashed?: boolean;
   albumId?: string;

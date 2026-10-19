@@ -5,7 +5,12 @@
   import type { UploadAsset } from '$lib/types';
   import { UploadState } from '$lib/types';
   import { getByteUnitString } from '$lib/utils/byte-units';
-  import { fileUploadHandler } from '$lib/utils/file-uploader';
+  import {
+    fileUploadHandler,
+    openFileUploadDialog,
+    resumeDirectUpload,
+    cancelDirectUpload,
+  } from '$lib/utils/file-uploader';
   import { Icon } from '@immich/ui';
   import {
     mdiAlertCircle,
@@ -32,7 +37,11 @@
 
   const handleRetry = async (uploadAsset: UploadAsset) => {
     uploadAssetsStore.removeItem(uploadAsset.id);
-    await fileUploadHandler({ files: [uploadAsset.file], albumId: uploadAsset.albumId });
+    if (uploadAsset.file instanceof File) {
+      await fileUploadHandler({ files: [uploadAsset.file], albumId: uploadAsset.albumId });
+    } else {
+      await openFileUploadDialog({ multiple: false, albumId: uploadAsset.albumId });
+    }
   };
 </script>
 
@@ -47,6 +56,8 @@
         <Icon icon={mdiCircleOutline} size="24" class="text-primary" title={$t('pending')} />
       {:else if uploadAsset.state === UploadState.STARTED}
         <Icon icon={mdiLoading} size="24" spin class="text-primary" title={$t('asset_skipped')} />
+      {:else if uploadAsset.state === UploadState.PAUSED}
+        <Icon icon={mdiRestart} size="24" class="text-primary" title={$t('upload_session_resume')} />
       {:else if uploadAsset.state === UploadState.ERROR}
         <Icon icon={mdiAlertCircle} size="24" class="text-danger" title={$t('error')} />
       {:else if uploadAsset.state === UploadState.DUPLICATED}
@@ -59,10 +70,24 @@
         <Icon icon={mdiCheckCircle} size="24" class="text-success" title={$t('asset_uploaded')} />
       {/if}
     </div>
-    <!-- <span>[{getByteUnitString(uploadAsset.file.size, $locale)}]</span> -->
     <span class="grow break-all">{uploadAsset.file.name}</span>
 
-    {#if uploadAsset.state === UploadState.DUPLICATED && uploadAsset.assetId}
+    {#if uploadAsset.directSessionId && (uploadAsset.state === UploadState.PAUSED || uploadAsset.state === UploadState.STARTED)}
+      <div class="flex items-center gap-1">
+        {#if uploadAsset.state === UploadState.PAUSED}
+          <button
+            type="button"
+            onclick={() => resumeDirectUpload(uploadAsset.id)}
+            aria-label={$t('upload_session_resume')}
+          >
+            <Icon icon={mdiRestart} size="20" />
+          </button>
+        {/if}
+        <button type="button" onclick={() => cancelDirectUpload(uploadAsset.id)} aria-label={$t('cancel')}>
+          <Icon icon={mdiClose} size="20" />
+        </button>
+      </div>
+    {:else if uploadAsset.state === UploadState.DUPLICATED && uploadAsset.assetId}
       <div class="flex items-center justify-between gap-1">
         <a
           href={uploadAsset.isTrashed
@@ -96,7 +121,7 @@
     <div class="relative mt-[5px] h-4.5 w-full rounded-md bg-gray-300 text-black dark:bg-gray-700">
       <div class="h-4.5 rounded-md bg-immich-primary transition-all" style={`width: ${uploadAsset.progress}%`}></div>
       <p class="absolute top-0.5 size-full text-center text-[10px] text-white">
-        {#if uploadAsset.message === $t('asset_hashing')}
+        {#if uploadAsset.message === $t('asset_hashing') || uploadAsset.message === $t('upload_session_verifying')}
           {uploadAsset.message}
         {:else}
           {uploadAsset.message}
@@ -104,6 +129,10 @@
         {/if}
       </p>
     </div>
+  {/if}
+
+  {#if uploadAsset.state === UploadState.PAUSED}
+    <p role="status">{uploadAsset.message}</p>
   {/if}
 
   {#if uploadAsset.state === UploadState.ERROR}

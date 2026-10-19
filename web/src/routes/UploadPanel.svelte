@@ -14,9 +14,9 @@
   let showOptions = $state(false);
   let concurrency = $state(uploadExecutionQueue.concurrency);
 
-  let { stats, isDismissible, isUploading, remainingUploads } = uploadAssetsStore;
+  let { stats, isDismissible, isUploading, remainingUploads, activeUploads } = uploadAssetsStore;
 
-  let hasRemaining = $derived($remainingUploads > 0);
+  let hasActive = $derived($activeUploads > 0);
 
   $effect(() => {
     if ($isUploading) {
@@ -25,7 +25,7 @@
   });
 
   $effect(() => {
-    if (hasRemaining) {
+    if (hasActive) {
       void acquireWakeLock();
     } else {
       void releaseWakeLock();
