@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Application version, for example v5.8.0-fork.rc.0"
+        description: 'Application version, for example v5.8.0-fork.rc.0'
         required: true
         type: string
       publish:
-        description: "Publish the verified server image to this fork owner on GHCR"
+        description: 'Publish the verified server image to this fork owner on GHCR'
         required: true
         type: boolean
         default: false
