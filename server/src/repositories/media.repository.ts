@@ -8,6 +8,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { Writable } from 'node:stream';
 import sharp, { Sharp } from 'sharp';
+import z from 'zod';
 import type {
   Bitmap,
   DecodeToBufferOptions,
@@ -46,6 +47,39 @@ const probe = (input: string, options: string[]): Promise<FfprobeData> =>
     // eslint-disable-next-line import-x/no-named-as-default-member
     ffmpeg.ffprobe(input, options, (error, data) => (error ? reject(error) : resolve(data))),
   );
+
+const strictProbeSchema = z.object({
+  streams: z
+    .array(
+      z.discriminatedUnion('codec_type', [
+        z.object({
+          codec_type: z.literal('video'),
+          codec_name: z.enum(['h264', 'hevc']),
+          width: z.number().int().positive(),
+          height: z.number().int().positive(),
+          pix_fmt: z.string().min(1),
+          profile: z.string().min(1),
+          time_base: z.string().regex(/^\d+\/[1-9]\d*$/),
+          avg_frame_rate: z.string().regex(/^[1-9]\d*\/[1-9]\d*$/),
+          nb_frames: z.coerce.number().int().positive(),
+        }),
+        z.object({
+          codec_type: z.literal('audio'),
+          codec_name: z.literal('aac'),
+          profile: z.string().min(1),
+          channels: z.number().int().positive(),
+          sample_rate: z.coerce.number().int().positive(),
+        }),
+      ]),
+    )
+    .min(1)
+    .max(2),
+  format: z.object({
+    format_name: z.string().min(1),
+    format_long_name: z.string().min(1),
+    duration: z.coerce.number().positive(),
+  }),
+});
 
 const pascalCase = (str: string) => upperFirst(camelCase(str.toLowerCase()));
 
@@ -254,6 +288,9 @@ export class MediaRepository {
   }
 
   async probe(input: string, options?: ProbeOptions): Promise<VideoInfo> {
+    if (options?.strictErrors) {
+      await this.checkProbeErrors(input);
+    }
     const results = await probe(input, options?.countFrames ? ['-count_packets'] : []); // gets frame count quickly: https://stackoverflow.com/a/28376817
     return {
       format: {
@@ -308,12 +345,17 @@ export class MediaRepository {
    * Needed for accurate segments, especially when remuxing, seeking and/or VFR is involved.
    * Scanning packets for keyframes in JS is much faster than -skip_frame nokey since it avoids decoding the video.
    */
-  probePackets(input: string, streamIndex: number): Promise<VideoPacketInfo | null> {
+  probePackets(
+    input: string,
+    streamIndex: number,
+    options?: { expectedPackets: number },
+  ): Promise<VideoPacketInfo | null> {
     const ffprobe = spawn(
       'ffprobe',
       [
         '-v',
         'error',
+        ...(options ? ['-nofind_stream_info', '-fflags', '+noparse+nofillin'] : []),
         '-select_streams',
         String(streamIndex),
         '-show_entries',
@@ -326,6 +368,8 @@ export class MediaRepository {
     );
 
     let totalDuration = 0;
+    let observedPackets = 0;
+    let invalidPacket = false;
     const keyframePts: number[] = [];
     const keyframeAccDuration: number[] = [];
     const keyframeOwnDuration: number[] = [];
@@ -338,8 +382,10 @@ export class MediaRepository {
       const pts = Number.parseInt(ptsStr);
       const duration = Number.parseInt(durationStr);
       if (Number.isNaN(pts) || Number.isNaN(duration) || !flags) {
+        invalidPacket = true;
         return;
       }
+      observedPackets++;
       // Discarded packets don't contribute to packet count, but still contribute to video duration
       totalDuration += duration;
       if (flags[1] !== 'D') {
@@ -361,7 +407,12 @@ export class MediaRepository {
     let stderr = '';
     let remainder = '';
     ffprobe.stderr.setEncoding('utf8');
-    ffprobe.stderr.on('data', (chunk: string) => (stderr += chunk));
+    ffprobe.stderr.on('data', (chunk: string) => {
+      stderr += chunk;
+      if (options && stderr.length > 65_536) {
+        ffprobe.kill();
+      }
+    });
     ffprobe.stdout.setEncoding('utf8');
     ffprobe.stdout.on('data', (chunk: string) => {
       const lines = chunk.split('\n');
@@ -379,6 +430,9 @@ export class MediaRepository {
           return reject(new Error(`ffprobe exited with code ${code}: ${stderr.trim()}`));
         }
         parseLine(remainder);
+        if (options && (stderr.trim() || invalidPacket || observedPackets !== options.expectedPackets)) {
+          return reject(new Error(`Incomplete bounded packet index: ${stderr.trim() || observedPackets}`));
+        }
         if (postDiscard.length === 0) {
           return resolve(null);
         }
@@ -391,6 +445,53 @@ export class MediaRepository {
           keyframeAccDuration,
           keyframeOwnDuration,
         });
+      });
+    });
+  }
+
+  private checkProbeErrors(input: string): Promise<void> {
+    const child = spawn(
+      process.env.FFPROBE_PATH || 'ffprobe',
+      [
+        '-v',
+        'warning',
+        '-show_entries',
+        'format=format_name,format_long_name,duration:stream=codec_type,codec_name,width,height,pix_fmt,profile,time_base,avg_frame_rate,nb_frames,channels,sample_rate',
+        '-of',
+        'json',
+        input,
+      ],
+      { stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => {
+      stdout += chunk;
+      if (stdout.length > 65_536) {
+        child.kill();
+      }
+    });
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk: string) => {
+      stderr += chunk;
+      if (stderr.length > 65_536) {
+        child.kill();
+      }
+    });
+    return new Promise((resolve, reject) => {
+      child.on('error', reject);
+      child.on('close', (code) => {
+        if (code !== 0 || stderr.trim()) {
+          reject(new Error(`Bounded ffprobe failed: ${stderr.trim() || code}`));
+        } else {
+          try {
+            strictProbeSchema.parse(JSON.parse(stdout));
+            resolve();
+          } catch {
+            reject(new Error('Incomplete bounded stream metadata'));
+          }
+        }
       });
     });
   }

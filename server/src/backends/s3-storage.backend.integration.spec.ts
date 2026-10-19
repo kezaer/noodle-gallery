@@ -8,7 +8,7 @@ import { S3StorageBackend } from 'src/backends/s3-storage.backend.js';
 import { CacheControl } from 'src/enum.js';
 import { RangeNotSatisfiableError } from 'src/interfaces/storage-backend.interface.js';
 import { prepareRangedMetadata } from 'src/utils/ranged-metadata.js';
-import { rawMetadataMovie } from 'test/fixtures/ranged-metadata.js';
+import { indexedMetadataMovie, rawMetadataMovie } from 'test/fixtures/ranged-metadata.js';
 
 const canRunDocker = process.env.IMMICH_TEST_DOCKER === 'true';
 
@@ -94,6 +94,36 @@ describe.skipIf(!canRunDocker)('S3StorageBackend integration (MinIO)', () => {
     await backend.put('metadata/compressed.mov', rawMetadataMovie('avc1'));
     await expect(prepareRangedMetadata(backend, 'metadata/compressed.mov', 4096)).resolves.toMatchObject({
       kind: 'needsFullRead',
+    });
+  });
+
+  it.each(['avc1', 'hvc1'] as const)('retains bounded %s and AAC samples from real S3 ranges', async (codec) => {
+    const data = indexedMetadataMovie({ codec, audio: true });
+    const key = `metadata/${codec}-aac.mp4`;
+    await backend.put(key, data);
+    const result = await prepareRangedMetadata(backend, key, 4096);
+    expect(result.kind).toBe('complete');
+    if (result.kind !== 'complete') throw new Error(result.reason);
+    try {
+      expect(result).toMatchObject({
+        codec: codec === 'avc1' ? 'h264' : 'hevc',
+        audio: 'aac',
+        bytes: data.length - 21 + 7,
+      });
+      const retained = await readFile(result.localPath);
+      expect(retained.subarray(-21, -17)).toEqual(Buffer.alloc(4, 7));
+      expect(retained.subarray(-6, -3)).toEqual(Buffer.alloc(3, 7));
+      expect(retained.subarray(-17, -6)).toEqual(Buffer.alloc(11));
+    } finally {
+      await result.cleanup();
+    }
+  });
+
+  it('rejects metadata-track S3 objects before treating their partial payload as complete', async () => {
+    await backend.put('metadata/timed.mp4', indexedMetadataMovie({ metadataTrack: true }));
+    await expect(prepareRangedMetadata(backend, 'metadata/timed.mp4', 4096)).resolves.toMatchObject({
+      kind: 'needsFullRead',
+      reason: 'Metadata and data tracks require a full read',
     });
   });
 

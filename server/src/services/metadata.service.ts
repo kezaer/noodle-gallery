@@ -276,7 +276,12 @@ export class MetadataService extends BaseService {
       try {
         const readMetadata = () =>
           Promise.all([
-            this.getExifTags(asset, original.localPath, localSidecar?.localPath),
+            this.getExifTags(
+              asset,
+              original.localPath,
+              localSidecar?.localPath,
+              original.kind === 'ranged' && original.codec !== 'rawvideo' ? original.sampleCount : undefined,
+            ),
             this.storageRepository.stat(original.localPath),
           ]);
         let extracted: Awaited<ReturnType<typeof readMetadata>>;
@@ -285,14 +290,17 @@ export class MetadataService extends BaseService {
           const [result] = extracted;
           if (
             original.kind === 'ranged' &&
-            (result.tags.FileType !== 'MOV' ||
+            (!['MOV', 'MP4', 'M4V'].includes(result.tags.FileType ?? '') ||
               (result.tags.errors?.length ?? 0) > 0 ||
-              result.video?.codecName !== 'rawvideo' ||
+              (result.tags.warnings?.length ?? 0) > 0 ||
+              result.video?.codecName !== original.codec ||
               !result.video.width ||
               !result.video.height ||
               !result.video.timeBase ||
               result.video.frameCount !== original.sampleCount ||
-              result.packets?.packetCount !== original.sampleCount ||
+              !result.packets ||
+              (original.codec === 'rawvideo' && result.packets.packetCount !== original.sampleCount) ||
+              (original.audio === 'aac' && (result.audio?.codecName !== 'aac' || !result.audio.profile)) ||
               !result.format?.formatName)
           ) {
             throw new Error('Incomplete bounded video metadata');
@@ -704,6 +712,7 @@ export class MetadataService extends BaseService {
     asset: { originalPath: string; files: AssetFile[]; type: AssetType },
     localOriginalPath?: string,
     localSidecarPath?: string,
+    containerPacketCount?: number,
   ) {
     const { sidecarFile } = getAssetFiles(asset.files);
     const shouldProbe = asset.type === AssetType.Video || asset.originalPath.toLowerCase().endsWith('.gif');
@@ -713,7 +722,7 @@ export class MetadataService extends BaseService {
     const [mediaTags, sidecarTags, videoResult] = await Promise.all([
       this.metadataRepository.readTags(effectiveOriginalPath),
       effectiveSidecarPath ? this.metadataRepository.readTags(effectiveSidecarPath) : null,
-      shouldProbe ? this.getVideoTags(effectiveOriginalPath) : null,
+      shouldProbe ? this.getVideoTags(effectiveOriginalPath, containerPacketCount) : null,
     ]);
 
     // prefer dates from sidecar tags
@@ -1322,11 +1331,18 @@ export class MetadataService extends BaseService {
     return Math.round(Duration.fromObject({ seconds }).toMillis());
   }
 
-  private async getVideoTags(originalPath: string) {
-    const { videoStreams, audioStreams, format } = await this.mediaRepository.probe(originalPath);
+  private async getVideoTags(originalPath: string, containerPacketCount?: number) {
+    const { videoStreams, audioStreams, format } =
+      containerPacketCount === undefined
+        ? await this.mediaRepository.probe(originalPath)
+        : await this.mediaRepository.probe(originalPath, { countFrames: false, strictErrors: true });
     const video = videoStreams[0];
     const audio = audioStreams[0];
-    const packets = video?.timeBase ? await this.mediaRepository.probePackets(originalPath, video.index) : null;
+    const packets = video?.timeBase
+      ? containerPacketCount === undefined
+        ? await this.mediaRepository.probePackets(originalPath, video.index)
+        : await this.mediaRepository.probePackets(originalPath, video.index, { expectedPackets: containerPacketCount })
+      : null;
 
     const tags: Pick<ImmichTags, 'Duration' | 'Orientation' | 'ImageWidth' | 'ImageHeight'> = {};
 

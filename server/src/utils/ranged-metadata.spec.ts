@@ -1,7 +1,7 @@
 import { readFile, stat } from 'node:fs/promises';
 import { Readable } from 'node:stream';
 import { prepareRangedMetadata } from 'src/utils/ranged-metadata.js';
-import { rawMetadataMovie } from 'test/fixtures/ranged-metadata.js';
+import { indexedMetadataMovie, rawMetadataMovie } from 'test/fixtures/ranged-metadata.js';
 
 const storeFor = (data: Buffer) => ({
   headObject: vi.fn().mockResolvedValue({ bytes: data.length }),
@@ -69,7 +69,7 @@ describe(prepareRangedMetadata.name, () => {
     const data = rawMetadataMovie();
     data.writeUInt32BE(1_000_001, data.indexOf('stsz') + 12);
     const result = await prepareRangedMetadata(storeFor(data), 'private.mov', 4096);
-    expect(result).toMatchObject({ kind: 'needsFullRead', reason: 'Unsupported raw video frame count' });
+    expect(result).toMatchObject({ kind: 'needsFullRead', reason: 'Unsupported indexed sample count' });
   });
 
   it('falls back for malformed nested atoms without retaining a temp file', async () => {
@@ -77,5 +77,102 @@ describe(prepareRangedMetadata.name, () => {
     data.writeUInt32BE(3, data.indexOf('stts') - 4);
     const result = await prepareRangedMetadata(storeFor(data), 'private.mov', 4096);
     expect(result).toMatchObject({ kind: 'needsFullRead', reason: 'Invalid nested atom size' });
+  });
+});
+
+describe('indexed compressed metadata', () => {
+  it.each(['avc1', 'hvc1'] as const)('retains the first %s sample and complete container index', async (codec) => {
+    const data = indexedMetadataMovie({ codec });
+    const result = await prepareRangedMetadata(storeFor(data), 'private.mp4', 4096);
+    expect(result.kind).toBe('complete');
+    if (result.kind !== 'complete') throw new Error(result.reason);
+    try {
+      expect(result).toMatchObject({ codec: codec === 'avc1' ? 'h264' : 'hevc', audio: 'none', sampleCount: 3 });
+      expect(result.bytes).toBe(data.length - 15 + 4);
+      const retained = await readFile(result.localPath);
+      expect(retained.subarray(0, -11)).toEqual(data.subarray(0, -11));
+      expect(retained.subarray(-11)).toEqual(Buffer.alloc(11));
+    } finally {
+      await result.cleanup();
+    }
+  });
+
+  it('retains both first samples for video with AAC audio', async () => {
+    const data = indexedMetadataMovie({ audio: true });
+    const result = await prepareRangedMetadata(storeFor(data), 'private.mp4', 4096);
+    expect(result.kind).toBe('complete');
+    if (result.kind !== 'complete') throw new Error(result.reason);
+    try {
+      expect(result).toMatchObject({ codec: 'h264', audio: 'aac', bytes: data.length - 21 + 7 });
+    } finally {
+      await result.cleanup();
+    }
+  });
+
+  it('charges selected samples against the same byte budget as container atoms', async () => {
+    const data = indexedMetadataMovie({ audio: true });
+    const result = await prepareRangedMetadata(storeFor(data), 'private.mp4', data.length - 21 + 6);
+    expect(result).toMatchObject({
+      kind: 'needsFullRead',
+      reason: 'Metadata byte budget exceeded',
+      bytes: data.length - 21 + 4,
+    });
+  });
+
+  it('rejects timed metadata even when video and AAC tables are otherwise supported', async () => {
+    const result = await prepareRangedMetadata(
+      storeFor(indexedMetadataMovie({ audio: true, metadataTrack: true })),
+      'private.mp4',
+      4096,
+    );
+    expect(result).toMatchObject({ kind: 'needsFullRead', reason: 'Metadata and data tracks require a full read' });
+  });
+
+  it('rejects missing codec parameter sets', async () => {
+    const data = indexedMetadataMovie();
+    data[data.indexOf('avcC') + 9] = 0;
+    const result = await prepareRangedMetadata(storeFor(data), 'private.mp4', 4096);
+    expect(result).toMatchObject({ kind: 'needsFullRead', reason: 'Incomplete AVC configuration' });
+  });
+
+  it('rejects indexed samples outside media', async () => {
+    const data = indexedMetadataMovie();
+    data.writeUInt32BE(0xff_ff_ff_ff, data.indexOf('stco') + 12);
+    const result = await prepareRangedMetadata(storeFor(data), 'private.mp4', 4096);
+    expect(result).toMatchObject({ kind: 'needsFullRead', reason: 'Invalid media chunk range' });
+  });
+  it('rejects an incomplete variable sample-size table', async () => {
+    const data = indexedMetadataMovie();
+    data.writeUInt32BE(4, data.indexOf('stsz') + 12);
+    expect(await prepareRangedMetadata(storeFor(data), 'private.mp4', 4096)).toMatchObject({
+      kind: 'needsFullRead',
+      reason: 'Incomplete sample sizes',
+    });
+  });
+
+  it('rejects excess samples in the chunk mapping', async () => {
+    const data = indexedMetadataMovie();
+    data.writeUInt32BE(2, data.indexOf('stsc') + 16);
+    expect(await prepareRangedMetadata(storeFor(data), 'private.mp4', 4096)).toMatchObject({ kind: 'needsFullRead' });
+  });
+
+  it('rejects sync samples outside the declared frame count', async () => {
+    const data = indexedMetadataMovie();
+    data.writeUInt32BE(4, data.indexOf('stss') + 12);
+    expect(await prepareRangedMetadata(storeFor(data), 'private.mp4', 4096)).toMatchObject({
+      kind: 'needsFullRead',
+      reason: 'Invalid sync sample',
+    });
+  });
+
+  it('rejects overlapping audio and video sample ranges', async () => {
+    const data = indexedMetadataMovie({ audio: true });
+    const video = data.indexOf('stco');
+    const audio = data.indexOf('stco', video + 4);
+    data.writeUInt32BE(data.readUInt32BE(video + 12), audio + 12);
+    expect(await prepareRangedMetadata(storeFor(data), 'private.mp4', 4096)).toMatchObject({
+      kind: 'needsFullRead',
+      reason: 'Overlapping media samples',
+    });
   });
 });

@@ -199,6 +199,7 @@ export interface VideoCodecSWConfig {
 
 export interface ProbeOptions {
   countFrames: boolean;
+  strictErrors?: boolean;
 }
 
 export interface VideoInterfaces {
