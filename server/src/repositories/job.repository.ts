@@ -530,6 +530,28 @@ export class JobRepository {
       return;
     }
     for (const row of await this.transfers.pendingJobs()) {
+      const queue = this.getQueue(this.getQueueName(row.item.name));
+      const existing = await queue.getJob(row.token);
+      if (existing) {
+        const state = await existing.getState();
+        if (state === 'failed' || state === 'completed') {
+          await this.transfers.recordQueueTerminal({
+            token: row.token,
+            outcome: state === 'completed' ? 'success' : 'failed',
+            attempts: Math.max(existing.attemptsStarted, existing.attemptsMade),
+          });
+          if (state === 'failed') {
+            this.logger.warn(`Upload job ${row.token} exhausted its queue recovery policy: ${existing.failedReason}`);
+          }
+        } else if (state !== 'unknown') {
+          await this.transfers.finishJob(row.token, 'accepted');
+        }
+        continue;
+      }
+      if (row.attempts >= 3) {
+        await this.transfers.recordQueueTerminal({ token: row.token, outcome: 'failed', attempts: row.attempts });
+        continue;
+      }
       await this.queueStable(row.item, row.token);
       await this.transfers.finishJob(row.token, 'accepted');
     }

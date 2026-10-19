@@ -1,6 +1,8 @@
 import { CreateBucketCommand, S3Client } from '@aws-sdk/client-s3';
 import { schemaDiff, schemaFromCode, schemaFromDatabase } from '@immich/sql-tools';
+import { getQueueToken } from '@nestjs/bullmq';
 import { Test } from '@nestjs/testing';
+import { Queue, Worker } from 'bullmq';
 import { Kysely, sql } from 'kysely';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
@@ -10,6 +12,7 @@ import { Readable } from 'node:stream';
 import { GenericContainer, type StartedTestContainer, Wait } from 'testcontainers';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { S3StorageBackend } from 'src/backends/s3-storage.backend.js';
+import { OnJob } from 'src/decorators.js';
 import { AuthDto } from 'src/dtos/auth.dto.js';
 import { UploadSessionCreateDto } from 'src/dtos/upload-session.dto.js';
 import { JobName, JobStatus, QueueName } from 'src/enum.js';
@@ -40,6 +43,7 @@ describe.skipIf(!enabled)('upload sessions with PostgreSQL and MinIO', () => {
   let repo: UploadTransferRepository;
   let directory: string;
   let databaseUrl: string;
+  let redisConnection: { host: string; port: number };
   const config = newConfigRepositoryMock();
   const events = { emit: vi.fn<EventRepository['emit']>().mockResolvedValue(undefined) };
   const jobs = newJobRepositoryMock();
@@ -105,6 +109,15 @@ describe.skipIf(!enabled)('upload sessions with PostgreSQL and MinIO', () => {
       .withWaitStrategy(Wait.forHttp('/minio/health/live', 9000))
       .start();
     containers.push(minio);
+    const redis = await new GenericContainer(
+      'valkey/valkey:9@sha256:c123e3715db63d06d4ad6964884037aa0d5d4d703939b9929954112889708e1d',
+    )
+      .withExposedPorts(6379)
+      .withWaitStrategy(Wait.forLogMessage('Ready to accept connections'))
+      .start();
+    containers.push(redis);
+    redisConnection = { host: redis.getHost(), port: redis.getMappedPort(6379) };
+
     const endpoint = `http://${minio.getHost()}:${minio.getMappedPort(9000)}`;
     const client = new S3Client({
       region: 'us-east-1',
@@ -305,12 +318,18 @@ describe.skipIf(!enabled)('upload sessions with PostgreSQL and MinIO', () => {
     expect(await db.selectFrom('asset').selectAll().execute()).toHaveLength(1);
   });
   it.each([
-    { response: undefined, terminal: 'success', rejects: false },
-    { response: JobStatus.Failed, terminal: 'accepted', rejects: true },
-  ])('records a tracked $response result as $terminal', async ({ response, terminal, rejects }) => {
+    { response: undefined, terminal: 'success', rejects: false, priorAttempts: 0 },
+    { response: JobStatus.Failed, terminal: 'accepted', rejects: true, priorAttempts: 0 },
+    { response: JobStatus.Failed, terminal: 'failed', rejects: true, priorAttempts: 2 },
+  ])('records a tracked $response result as $terminal', async ({ response, terminal, rejects, priorAttempts }) => {
     const session = await upload();
     await complete(session.id);
     const [record] = await repo.pendingJobs();
+    await db
+      .updateTable('gallery_upload_job')
+      .set({ attempts: priorAttempts })
+      .where('token', '=', record.token)
+      .execute();
     const { sut, mocks } = newTestService(JobService, { transfers: repo });
     mocks.job.run.mockResolvedValue(response);
     const job = { ...record.item, id: record.token };
@@ -326,6 +345,24 @@ describe.skipIf(!enabled)('upload sessions with PostgreSQL and MinIO', () => {
       .where('token', '=', record.token)
       .executeTakeFirstOrThrow();
     expect(state.state).toBe(terminal);
+  });
+
+  it('propagates thrown errors and records the exhausted final attempt', async () => {
+    const session = await upload();
+    await complete(session.id);
+    const [record] = await repo.pendingJobs();
+    await db.updateTable('gallery_upload_job').set({ attempts: 2 }).where('token', '=', record.token).execute();
+    const { sut, mocks } = newTestService(JobService, { transfers: repo });
+    mocks.job.run.mockRejectedValue(new Error('processor failed'));
+    const job = { ...record.item, id: record.token };
+    await expect(sut.onJobRun(QueueName.MetadataExtraction, job)).rejects.toThrow('processor failed');
+    const outcome = await db
+      .selectFrom('gallery_upload_job')
+      .selectAll()
+      .where('token', '=', record.token)
+      .executeTakeFirstOrThrow();
+    expect(outcome.state).toBe('failed');
+    expect(outcome.attempts).toBe(3);
   });
 
   it('keeps a pinned replacement when a verifier fails after losing its stage generation', async () => {
@@ -381,6 +418,81 @@ describe.skipIf(!enabled)('upload sessions with PostgreSQL and MinIO', () => {
     ).toHaveLength(1);
     await reader?.cleanup();
     get.mockRestore();
+  });
+
+  it('records a real Redis deferred stalled failure even when BullMQ bypasses the application handler', async () => {
+    const session = await upload();
+    await complete(session.id);
+    const [record] = await repo.pendingJobs();
+    const prefix = `gallery-recovery-${randomUUID()}`;
+    const queue = new Queue(QueueName.MetadataExtraction, { connection: redisConnection, prefix });
+    let worker: Worker | undefined;
+    try {
+      await queue.add(record.item.name, record.item.data, {
+        jobId: record.token,
+        attempts: 3,
+        removeOnComplete: false,
+        removeOnFail: false,
+      });
+      const client = await queue.client;
+      await client.hset(queue.toKey(record.token), { defa: 'job stalled more than allowable limit', ats: 2 });
+      let calls = 0;
+      worker = new Worker(
+        QueueName.MetadataExtraction,
+        () => {
+          calls++;
+          return Promise.resolve();
+        },
+        { connection: redisConnection, prefix },
+      );
+      await vi.waitFor(
+        async () => {
+          const actual = await queue.getJob(record.token);
+          expect(await actual?.getState()).toBe('failed');
+        },
+        { timeout: 5000 },
+      );
+      expect(calls).toBe(0);
+      class QueueHandlers {}
+      for (const name of Object.values(JobName)) {
+        const descriptor = { value: () => Promise.reject(new Error(`Unexpected processing of ${name}`)) };
+        Object.defineProperty(QueueHandlers.prototype, name, descriptor);
+        OnJob({ name, queue: QueueName.MetadataExtraction })(QueueHandlers.prototype, name, descriptor);
+      }
+      const module = await Test.createTestingModule({
+        providers: [
+          JobRepository,
+          QueueHandlers,
+          { provide: UploadTransferRepository, useValue: repo },
+          { provide: ConfigRepository, useValue: config },
+          { provide: EventRepository, useValue: events },
+          { provide: LoggingRepository, useValue: logger },
+          { provide: getQueueToken(QueueName.MetadataExtraction), useValue: queue },
+        ],
+      }).compile();
+      const actualJobs = module.get(JobRepository);
+      actualJobs.setup([QueueHandlers]);
+      await actualJobs.reconcileUploadJobs();
+      await actualJobs.reconcileUploadJobs();
+      const exhausted = await db
+        .selectFrom('gallery_upload_job')
+        .selectAll()
+        .where('token', '=', record.token)
+        .executeTakeFirstOrThrow();
+      expect(exhausted.state).toBe('failed');
+      expect(exhausted.attempts).toBe(3);
+      expect(await queue.getJobCountByTypes('failed')).toBe(1);
+      await stages.reconcile();
+      const stage = await db
+        .selectFrom('gallery_original_stage')
+        .select('retained')
+        .where('assetId', '=', record.assetId)
+        .executeTakeFirstOrThrow();
+      expect(stage.retained).toBe(false);
+    } finally {
+      await worker?.close(true);
+      await queue.close();
+    }
   });
 
   it('keeps the control-table schema equal to its migration', async () => {

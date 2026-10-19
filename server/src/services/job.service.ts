@@ -134,6 +134,9 @@ export class JobService extends BaseService {
     const token =
       'id' in job && typeof job.id === 'string' && job.id.startsWith('gallery-upload-') ? job.id : undefined;
     const tracked = token && this.transfers ? await this.transfers.startJob(token) : undefined;
+    if (token && this.transfers && !tracked) {
+      return;
+    }
     const run = async () => {
       let outcome: 'success' | 'skipped' | 'failed' | 'accepted' = 'accepted';
       try {

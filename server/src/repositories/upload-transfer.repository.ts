@@ -438,4 +438,24 @@ export class UploadTransferRepository {
       .where('token', '=', token);
     await (state === 'accepted' ? query.where('state', 'in', ['pending', 'accepted']) : query).execute();
   }
+  async recordQueueTerminal({
+    token,
+    outcome,
+    attempts,
+  }: {
+    token: string;
+    outcome: 'success' | 'failed';
+    attempts: number;
+  }) {
+    await this.db
+      .updateTable('gallery_upload_job')
+      .set({
+        state: outcome,
+        attempts: sql`greatest(attempts, ${attempts})`,
+        updatedAt: new Date(),
+      })
+      .where('token', '=', token)
+      .where('state', 'in', ['pending', 'accepted'])
+      .execute();
+  }
 }
